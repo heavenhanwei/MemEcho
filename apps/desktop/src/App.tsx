@@ -3,18 +3,28 @@ import {
   CircleUserRound,
   FileAudio,
   History,
+  Mic,
   Network,
   Pause,
   Play,
   Radio,
-  Settings,
+  RotateCcw,
+  Speaker,
   Square,
+  Trash2,
   Upload,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { EchoSphere } from "./components/EchoSphere";
 import { ReportView } from "./components/ReportView";
 import { gateway } from "./lib/api";
+import {
+  bridge,
+  isTauriRuntime,
+  type AudioDevice,
+  type RecoveryMeta,
+  type RecoveryStatus,
+} from "./lib/tauri";
 import { useAppStore, type Page } from "./store";
 
 const nav: Array<{ page: Page; label: string; icon: typeof Radio }> = [
@@ -30,57 +40,118 @@ function formatTime(seconds: number) {
     .join(":");
 }
 
+function describeError(cause: unknown, fallback: string) {
+  if (cause instanceof Error) return cause.message;
+  if (typeof cause === "string" && cause) return cause;
+  return fallback;
+}
+
 function NowPage() {
   const state = useAppStore();
-  const timer = useRef<number>();
+  const isTauri = isTauriRuntime();
+  const timer = useRef<number | undefined>(undefined);
   const recorder = useRef<MediaRecorder | null>(null);
   const stream = useRef<MediaStream | null>(null);
   const socket = useRef<WebSocket | null>(null);
+  const audioContext = useRef<AudioContext | null>(null);
+  const backend = useRef<"tauri" | "web">("web");
   const [source, setSource] = useState<"microphone" | "mixed">("mixed");
   const [error, setError] = useState("");
+  const [meterNote, setMeterNote] = useState("");
+  const [devices, setDevices] = useState<AudioDevice[]>([]);
+  const [micDeviceId, setMicDeviceId] = useState("");
+  const [renderDeviceId, setRenderDeviceId] = useState("");
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let cancelled = false;
+    bridge
+      .listAudioDevices()
+      .then((found) => {
+        if (!cancelled) setDevices(found);
+      })
+      .catch((cause) => {
+        if (!cancelled) setMeterNote(describeError(cause, "无法枚举音频设备，将使用系统默认设备"));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isTauri]);
 
   useEffect(
     () => () => {
       if (timer.current) window.clearInterval(timer.current);
-      stream.current?.getTracks().forEach((track) => track.stop());
+      stopMeter();
       socket.current?.close();
     },
     [],
   );
 
+  function startMeter(media: MediaStream) {
+    const context = new AudioContext();
+    audioContext.current = context;
+    const analyser = context.createAnalyser();
+    const sourceNode = context.createMediaStreamSource(media);
+    sourceNode.connect(analyser);
+    analyser.fftSize = 256;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const measure = () => {
+      if (!stream.current) return;
+      analyser.getByteFrequencyData(data);
+      const average = data.reduce((sum, value) => sum + value, 0) / data.length / 255;
+      useAppStore.getState().patch({ volume: average });
+      requestAnimationFrame(measure);
+    };
+    measure();
+  }
+
+  function stopMeter() {
+    stream.current?.getTracks().forEach((track) => track.stop());
+    stream.current = null;
+    if (audioContext.current) {
+      void audioContext.current.close();
+      audioContext.current = null;
+    }
+  }
+
   async function start() {
     if (state.soulState !== "idle") return;
     setError("");
+    setMeterNote("");
     try {
       const session = await gateway.createSession("新的回声", source);
-      const media = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
-      });
-      stream.current = media;
-      recorder.current = new MediaRecorder(media);
-      recorder.current.start(1000);
       const ws = new WebSocket(gateway.liveUrl(session.id));
       socket.current = ws;
       ws.onmessage = (message) => {
         const event = JSON.parse(message.data);
         if (event.type === "transcript.partial" || event.type === "transcript.final") {
-          state.patch({ caption: event.text });
+          useAppStore.getState().patch({ caption: event.text });
         }
       };
-      const context = new AudioContext();
-      const analyser = context.createAnalyser();
-      const sourceNode = context.createMediaStreamSource(media);
-      sourceNode.connect(analyser);
-      analyser.fftSize = 256;
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      const measure = () => {
-        if (!stream.current) return;
-        analyser.getByteFrequencyData(data);
-        const average = data.reduce((sum, value) => sum + value, 0) / data.length / 255;
-        state.patch({ volume: average });
-        requestAnimationFrame(measure);
-      };
-      measure();
+
+      if (isTauri) {
+        backend.current = "tauri";
+        await bridge.startCapture(micDeviceId || null, renderDeviceId || null);
+        try {
+          const media = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true },
+          });
+          stream.current = media;
+          startMeter(media);
+        } catch {
+          setMeterNote("音量计不可用：未授予窗口麦克风访问权限（不影响本地录音）");
+        }
+      } else {
+        backend.current = "web";
+        const media = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true },
+        });
+        stream.current = media;
+        recorder.current = new MediaRecorder(media);
+        recorder.current.start(1000);
+        startMeter(media);
+      }
+
       state.patch({
         sessionId: session.id,
         requestId: session.request_id,
@@ -93,32 +164,62 @@ function NowPage() {
         1000,
       );
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "无法开始录音");
+      socket.current?.close();
+      socket.current = null;
+      stopMeter();
+      if (timer.current) window.clearInterval(timer.current);
+      timer.current = undefined;
+      setError(describeError(cause, "无法开始录音"));
+      state.patch({ soulState: "idle" });
     }
   }
 
-  function togglePause() {
+  async function togglePause() {
     const paused = state.soulState === "paused";
-    if (paused) recorder.current?.resume();
-    else recorder.current?.pause();
-    state.patch({ soulState: paused ? "recording" : "paused" });
+    try {
+      if (backend.current === "tauri") {
+        if (paused) await bridge.resumeCapture();
+        else await bridge.pauseCapture();
+      } else if (paused) {
+        recorder.current?.resume();
+      } else {
+        recorder.current?.pause();
+      }
+      state.patch({ soulState: paused ? "recording" : "paused" });
+    } catch (cause) {
+      setError(describeError(cause, "无法切换暂停状态"));
+    }
   }
 
   async function stop() {
     if (timer.current) window.clearInterval(timer.current);
-    recorder.current?.stop();
-    stream.current?.getTracks().forEach((track) => track.stop());
-    stream.current = null;
+    timer.current = undefined;
+    setError("");
+    try {
+      if (backend.current === "tauri") {
+        await bridge.stopCapture();
+      } else {
+        recorder.current?.stop();
+        recorder.current = null;
+      }
+    } catch (cause) {
+      setError(describeError(cause, "停止录音时出现问题"));
+    }
+    stopMeter();
     socket.current?.send("end");
+    socket.current?.close();
+    socket.current = null;
+
+    const { sessionId, requestId } = useAppStore.getState();
     state.patch({
       soulState: "processing",
       jobStatus: "queued",
-      progress: 4,
-      stageLabel: "正在安全保存本地录音",
+      progress: 0,
+      stageLabel: "录音已结束，正在提交分析请求",
     });
-    if (!state.sessionId || !state.requestId) return;
+    if (!sessionId || !requestId) return;
     try {
-      const job = await gateway.analyze(state.sessionId, state.requestId);
+      const job = await gateway.analyze(sessionId, requestId);
       state.patch({ jobId: job.id });
       while (true) {
         const current = await gateway.job(job.id);
@@ -128,7 +229,7 @@ function NowPage() {
           stageLabel: current.stage_label,
         });
         if (current.status === "complete") {
-          const result = await gateway.result(state.sessionId);
+          const result = await gateway.result(sessionId);
           state.patch({ result, soulState: "responding", page: "report" });
           break;
         }
@@ -136,7 +237,7 @@ function NowPage() {
         await new Promise((resolve) => window.setTimeout(resolve, 350));
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "分析失败");
+      setError(describeError(cause, "分析失败"));
       state.patch({ soulState: "idle" });
     }
   }
@@ -155,6 +256,9 @@ function NowPage() {
       </section>
     );
   }
+
+  const inputDevices = devices.filter((device) => device.is_input);
+  const outputDevices = devices.filter((device) => !device.is_input);
 
   return (
     <section className="now-page">
@@ -184,6 +288,51 @@ function NowPage() {
             <Radio size={16} /> 仅麦克风
           </button>
         </div>
+        {isTauri && (
+          <div className="device-selects">
+            <label>
+              <span>
+                <Mic size={14} /> 麦克风
+              </span>
+              <select
+                value={micDeviceId}
+                onChange={(event) => setMicDeviceId(event.target.value)}
+                disabled={state.soulState !== "idle"}
+              >
+                <option value="">系统默认麦克风</option>
+                {inputDevices.map((device) => (
+                  <option key={device.id} value={device.id}>
+                    {device.name}
+                    {device.is_default ? "（默认）" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>
+                <Speaker size={14} /> 系统输出
+              </span>
+              <select
+                value={renderDeviceId}
+                onChange={(event) => setRenderDeviceId(event.target.value)}
+                disabled={state.soulState !== "idle"}
+              >
+                <option value="">系统默认输出</option>
+                {outputDevices.map((device) => (
+                  <option key={device.id} value={device.id}>
+                    {device.name}
+                    {device.is_default ? "（默认）" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+        <p className="backend-note">
+          {isTauri
+            ? "桌面原生录音 · 麦克风＋系统输出双轨（WASAPI）"
+            : "网页演示模式 · 使用 MediaRecorder 仅录制麦克风"}
+        </p>
       </div>
       <div className="soul-column">
         <EchoSphere state={state.soulState} energy={state.volume} onActivate={start} />
@@ -198,6 +347,7 @@ function NowPage() {
             </p>
             <strong>{formatTime(state.elapsed)}</strong>
             <p className="live-caption">{state.caption}</p>
+            {meterNote && <p className="meter-note">{meterNote}</p>}
             <div>
               <button onClick={togglePause}>
                 {state.soulState === "paused" ? <Play size={17} /> : <Pause size={17} />}
@@ -232,12 +382,113 @@ function NowPage() {
   );
 }
 
+const recoveryStatusLabel: Record<RecoveryStatus, string> = {
+  recording: "录音中（被中断）",
+  paused: "已暂停（被中断）",
+  finalized: "已完成",
+  failed: "失败",
+};
+
+function formatStarted(iso: string) {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime())
+    ? iso
+    : date.toLocaleString("zh-CN", { hour12: false });
+}
+
 function EchoesPage() {
   const { result, setPage } = useAppStore();
+  const isTauri = isTauriRuntime();
+  const [recoverable, setRecoverable] = useState<RecoveryMeta[]>([]);
+  const [recoveryError, setRecoveryError] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!isTauri) return;
+    try {
+      setRecoverable(await bridge.listRecoverableSessions());
+      setRecoveryError("");
+    } catch (cause) {
+      setRecoveryError(describeError(cause, "无法读取可恢复的会话"));
+    }
+  }, [isTauri]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  async function recover(sessionId: string) {
+    setBusyId(sessionId);
+    setRecoveryError("");
+    try {
+      await bridge.recoverSession(sessionId);
+      await refresh();
+    } catch (cause) {
+      setRecoveryError(describeError(cause, "恢复失败"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function remove(sessionId: string) {
+    setBusyId(sessionId);
+    setRecoveryError("");
+    try {
+      await bridge.deleteLocalSession(sessionId);
+      await refresh();
+    } catch (cause) {
+      setRecoveryError(describeError(cause, "删除失败"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   return (
     <section className="list-page">
       <p className="eyebrow">YOUR ECHOES</p>
       <h1>每一次重要的对话，都会留下可以回看的形状。</h1>
+
+      {isTauri && (
+        <div className="recovery-section">
+          <p className="eyebrow">INTERRUPTED · 被中断的录音</p>
+          {recoverable.length === 0 ? (
+            <p className="recovery-empty">没有被中断、需要恢复的本地录音。</p>
+          ) : (
+            <div className="recovery-list">
+              {recoverable.map((meta) => (
+                <article key={meta.session_id} className="recovery-card">
+                  <div>
+                    <b>{meta.session_id.slice(0, 8)}…</b>
+                    <p>
+                      {recoveryStatusLabel[meta.status]} · 开始于 {formatStarted(meta.started_at)}
+                    </p>
+                    {meta.error_code ? (
+                      <p className="recovery-error">错误：{meta.error_code}</p>
+                    ) : null}
+                  </div>
+                  <div className="recovery-actions">
+                    <button
+                      onClick={() => recover(meta.session_id)}
+                      disabled={busyId === meta.session_id}
+                    >
+                      <RotateCcw size={14} /> 恢复
+                    </button>
+                    <button
+                      className="danger"
+                      onClick={() => remove(meta.session_id)}
+                      disabled={busyId === meta.session_id}
+                    >
+                      <Trash2 size={14} /> 删除
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+          {recoveryError && <p className="error-banner">{recoveryError}</p>}
+        </div>
+      )}
+
       <div className="session-list">
         <article>
           <time>今天</time>
@@ -346,4 +597,3 @@ export function App() {
     </div>
   );
 }
-

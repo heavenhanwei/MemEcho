@@ -109,6 +109,23 @@ function MemoryPoints() {
   );
 }
 
+function prefersReducedMotion() {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+function supportsWebGL() {
+  try {
+    const canvas = document.createElement("canvas");
+    return Boolean(canvas.getContext("webgl2") ?? canvas.getContext("webgl"));
+  } catch {
+    return false;
+  }
+}
+
 export function EchoSphere({
   state,
   energy,
@@ -118,31 +135,42 @@ export function EchoSphere({
   energy: number;
   onActivate?: () => void;
 }) {
+  const useStatic = prefersReducedMotion() || !supportsWebGL();
+  const hitButton = onActivate ? (
+    <button
+      className="sphere-hit"
+      aria-label={state === "idle" ? "开始录音" : "memEcho 当前状态"}
+      onClick={onActivate}
+    />
+  ) : null;
   return (
     <div className={`sphere-stage is-${state}`}>
       <div className="echo-shell shell-one" />
       <div className="echo-shell shell-two" />
-      <Canvas
-        camera={{ position: [0, 0, 4.6], fov: 42 }}
-        dpr={[1, 1.7]}
-        gl={{ alpha: true, antialias: true }}
-        fallback={<div className="sphere-fallback" aria-label="memEcho 活动球体" />}
-      >
-        <ambientLight intensity={1.4} />
-        <pointLight position={[2, 2, 3]} intensity={4} color="#ffffff" />
-        <pointLight position={[-3, -1, 2]} intensity={2.5} color="#9d8df1" />
-        <SphereMesh state={state} energy={energy} />
-        {state === "memory" && <MemoryPoints />}
-        {onActivate && (
-          <Html center transform>
-            <button
-              className="sphere-hit"
-              aria-label={state === "idle" ? "开始录音" : "memEcho 当前状态"}
-              onClick={onActivate}
-            />
-          </Html>
-        )}
-      </Canvas>
+      {useStatic ? (
+        <div className="sphere-static" data-testid="sphere-static">
+          <div className="sphere-fallback" aria-label="memEcho 活动球体" />
+          {hitButton}
+        </div>
+      ) : (
+        <Canvas
+          camera={{ position: [0, 0, 4.6], fov: 42 }}
+          dpr={[1, 1.7]}
+          gl={{ alpha: true, antialias: true }}
+          fallback={<div className="sphere-fallback" aria-label="memEcho 活动球体" />}
+        >
+          <ambientLight intensity={1.4} />
+          <pointLight position={[2, 2, 3]} intensity={4} color="#ffffff" />
+          <pointLight position={[-3, -1, 2]} intensity={2.5} color="#9d8df1" />
+          <SphereMesh state={state} energy={energy} />
+          {state === "memory" && <MemoryPoints />}
+          {onActivate && (
+            <Html center transform>
+              {hitButton}
+            </Html>
+          )}
+        </Canvas>
+      )}
       <div className="sphere-glint" />
     </div>
   );

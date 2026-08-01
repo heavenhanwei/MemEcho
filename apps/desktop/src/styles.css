@@ -1,7 +1,6 @@
-@import url("https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500&display=swap");
-
 :root {
   font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-serif: "Songti SC", "STSong", "SimSun", "NSimSun", serif;
   color: #29273b;
   background: #f6f4ef;
   font-synthesis: none;
@@ -86,7 +85,7 @@ main { min-width: 0; overflow: hidden; }
   position: relative;
 }
 .hero-copy h1, .list-page h1, .relations-page h1, .settings-page h1, .report-hero h1 {
-  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-family: var(--font-serif);
   font-weight: 400;
   letter-spacing: -0.055em;
 }
@@ -99,6 +98,20 @@ main { min-width: 0; overflow: hidden; }
   background: rgba(255,255,255,.48); padding: 11px 15px; font-size: 11px;
 }
 .source-switch button.active { color: var(--violet); border-color: rgba(111,91,211,.35); background: rgba(111,91,211,.08); }
+.device-selects { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.device-selects label {
+  display: grid; gap: 6px; font-size: 10px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 16px; padding: 10px 12px;
+  background: rgba(255,255,255,.48); min-width: 210px;
+}
+.device-selects label > span { display: flex; align-items: center; gap: 6px; font-weight: 700; }
+.device-selects select {
+  border: 0; background: transparent; color: var(--ink); font-size: 12px;
+  max-width: 230px; outline: none; cursor: pointer;
+}
+.device-selects select:disabled { cursor: not-allowed; color: var(--muted); }
+.backend-note { margin: 16px 0 0; color: var(--muted); font-size: 10px; letter-spacing: .08em; }
+.meter-note { color: #a5644e; font-size: 10px; margin: 4px 0; }
 .soul-column { min-height: 535px; position: relative; display: grid; place-items: center; }
 .sphere-stage { width: min(520px, 42vw); aspect-ratio: 1; position: relative; }
 .sphere-stage canvas { position: relative; z-index: 3; }
@@ -114,6 +127,8 @@ main { min-width: 0; overflow: hidden; }
   box-shadow: 0 25px 80px rgba(77, 61, 173, .34);
   animation: breathe 5s ease-in-out infinite;
 }
+.sphere-static { position: absolute; inset: 0; display: grid; place-items: center; z-index: 3; }
+.sphere-static > * { grid-area: 1 / 1; }
 .echo-shell {
   position: absolute; inset: 16%; border-radius: 50%;
   border: 1px solid rgba(111,91,211,.18); z-index: 1; pointer-events: none;
@@ -129,7 +144,7 @@ main { min-width: 0; overflow: hidden; }
   background: rgba(255,255,255,.82); border: 1px solid var(--line); border-radius: 24px;
   box-shadow: var(--shadow); backdrop-filter: blur(22px); text-align: center;
 }
-.recording-panel > strong { display: block; font: 400 31px "Noto Serif SC", serif; margin: 8px; }
+.recording-panel > strong { display: block; font: 400 31px var(--font-serif); margin: 8px; }
 .live-pill { color: var(--violet); font-size: 10px; letter-spacing: .12em; margin: 0; }
 .live-pill i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #d36d6d; margin-right: 5px; }
 .live-caption { min-height: 22px; color: var(--muted); font-size: 12px; }
@@ -151,7 +166,7 @@ main { min-width: 0; overflow: hidden; }
 
 .processing { min-height: calc(100vh - 76px); display: grid; place-items: center; align-content: center; text-align: center; }
 .processing .sphere-stage { width: 350px; }
-.processing h1 { font: 400 47px "Noto Serif SC", serif; margin: 5px; }
+.processing h1 { font: 400 47px var(--font-serif); margin: 5px; }
 .processing > p:not(.eyebrow) { color: var(--muted); }
 .progress-track { width: 430px; height: 4px; background: rgba(111,91,211,.12); border-radius: 9px; overflow: hidden; margin: 20px; }
 .progress-track i { display: block; height: 100%; background: linear-gradient(90deg, var(--violet), var(--mint)); transition: width .35s; }
@@ -164,11 +179,30 @@ main { min-width: 0; overflow: hidden; }
   padding: 25px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
 }
 .session-list time { color: var(--muted); }
-.session-list b { font: 400 24px "Noto Serif SC", serif; }
+.session-list b { font: 400 24px var(--font-serif); }
 .session-list p { color: var(--muted); }
 .session-list button, .settings-grid button {
   border: 0; border-radius: 999px; padding: 11px 16px; background: var(--ink); color: white;
 }
+
+.recovery-section { margin-top: 40px; }
+.recovery-empty { color: var(--muted); font-size: 12px; }
+.recovery-list { display: grid; gap: 12px; margin-top: 14px; }
+.recovery-card {
+  display: flex; justify-content: space-between; align-items: center; gap: 18px;
+  border: 1px solid var(--line); border-radius: 20px; padding: 16px 20px;
+  background: var(--surface); box-shadow: var(--shadow);
+}
+.recovery-card b { font: 400 17px var(--font-serif); }
+.recovery-card p { color: var(--muted); font-size: 11px; margin: 4px 0 0; }
+.recovery-error { color: #a64c4c; }
+.recovery-actions { display: flex; gap: 8px; }
+.recovery-actions button {
+  display: flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); border-radius: 999px; padding: 9px 14px;
+  background: white; font-size: 11px;
+}
+.recovery-actions button.danger { color: #a64c4c; border-color: rgba(166,76,76,.35); }
 
 .relations-page {
   width: min(1250px, calc(100vw - 150px)); min-height: calc(100vh - 76px); margin: auto;
@@ -218,12 +252,12 @@ main { min-width: 0; overflow: hidden; }
 .disagreement-title { margin-top: 24px; }
 .disagreement { color: var(--muted); }
 .action-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
-.action-columns h3 { font: 400 23px "Noto Serif SC", serif; }
+.action-columns h3 { font: 400 23px var(--font-serif); }
 .action-row { display: grid; grid-template-columns: 90px 1fr; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line); }
 .action-row b { font-size: 9px; color: #397c70; }
 .action-row.proposed b { color: #a5644e; }
 .self-echo { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-.self-echo blockquote { margin: 20px 0; font: 400 23px/1.6 "Noto Serif SC", serif; }
+.self-echo blockquote { margin: 20px 0; font: 400 23px/1.6 var(--font-serif); }
 .self-echo footer { color: var(--muted); font: 400 11px/1.6 Inter, sans-serif; margin-top: 12px; }
 .rewrite { border-left: 2px solid var(--violet); padding: 4px 18px; margin: 20px 0; }
 .rewrite span { color: var(--violet); font-size: 10px; }
@@ -232,7 +266,7 @@ main { min-width: 0; overflow: hidden; }
 .evidence-row time, .evidence-row b { color: var(--violet); font-size: 10px; }
 .evidence-row p { margin: 5px 0; }
 .ask-card { display: grid; grid-template-columns: auto 1fr 1.2fr; gap: 18px; align-items: center; }
-.ask-card h2 { margin: 4px 0; font: 400 27px "Noto Serif SC", serif; }
+.ask-card h2 { margin: 4px 0; font: 400 27px var(--font-serif); }
 .ask-card p { color: var(--muted); font-size: 11px; }
 .ask-box { display: flex; padding: 5px; border: 1px solid var(--line); border-radius: 999px; background: white; }
 .ask-box input { flex: 1; min-width: 0; border: 0; outline: none; padding: 8px 13px; background: transparent; }
