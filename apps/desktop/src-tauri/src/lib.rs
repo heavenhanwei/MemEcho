@@ -1,6 +1,7 @@
 mod audio;
 mod commands;
-mod credential;
+pub mod credential;
+pub mod db;
 mod paths;
 mod recovery;
 mod state;
@@ -14,15 +15,21 @@ pub struct AppState {
     pub capture: Arc<Mutex<CaptureState>>,
     pub audio: Arc<Mutex<AudioCapture>>,
     pub sessions_dir: std::path::PathBuf,
+    pub db: db::Repository,
 }
 
 pub fn run() {
+    let sessions_dir = paths::sessions_dir();
+    let db_path = sessions_dir.join("memecho.db");
+    let db = db::Repository::open(&db_path).expect("failed to open local database");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             capture: Arc::new(Mutex::new(CaptureState::new())),
             audio: Arc::new(Mutex::new(AudioCapture::new())),
-            sessions_dir: paths::sessions_dir(),
+            sessions_dir,
+            db,
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_audio_devices,
@@ -36,6 +43,12 @@ pub fn run() {
             commands::credential_set,
             commands::credential_get,
             commands::credential_delete,
+            commands::create_local_session,
+            commands::update_local_session,
+            commands::list_local_sessions,
+            commands::get_local_session,
+            commands::save_analysis_results,
+            commands::get_analysis_results,
         ])
         .run(tauri::generate_context!())
         .expect("error while running memEcho");

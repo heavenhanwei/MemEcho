@@ -1,5 +1,6 @@
 use crate::audio::capture::AudioBackend;
 use crate::audio::AudioDevice;
+use crate::db;
 use crate::recovery::{RecoveryMeta, RecoveryStatus};
 use crate::state::RecordingStatus;
 use crate::AppState;
@@ -210,16 +211,28 @@ pub fn list_recoverable_sessions(state: State<'_, AppState>) -> Vec<RecoveryMeta
     crate::recovery::list_recoverable(&state.sessions_dir)
 }
 
-/// Delete a local session directory and all its contents.
+/// Delete a local session: cascade DB records, then remove local files.
+/// Path validation prevents traversal. Errors are recoverable (reported, not fatal).
 #[tauri::command]
-pub fn delete_local_session(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
+pub fn delete_local_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<db::LocalSession, String> {
     let session_dir = crate::paths::validate_session_path(&session_id, &state.sessions_dir)
         .map_err(|e| e.to_string())?;
-    if !session_dir.exists() {
-        return Err("Session not found".into());
+
+    // Cascade-delete DB records first (derived data for this session only)
+    let session = state
+        .db
+        .cascade_delete_session(&session_id, &state.sessions_dir)
+        .map_err(|e| e.to_string())?;
+
+    // Remove local audio/report files
+    if session_dir.exists() {
+        std::fs::remove_dir_all(&session_dir).map_err(|e| format!("file cleanup failed: {}", e))?;
     }
-    std::fs::remove_dir_all(&session_dir).map_err(|e| e.to_string())?;
-    Ok(())
+
+    Ok(session)
 }
 
 /// Store a credential in Windows Credential Manager.
@@ -264,5 +277,110 @@ pub fn recover_session(session_id: String, state: State<'_, AppState>) -> Result
         ..meta
     };
     final_meta.save(&session_dir).map_err(|e| e.to_string())?;
+
+    // Sync recovery status to DB if session exists there
+    let _ = state
+        .db
+        .update_session(&session_id, None, None, None, None, Some("finalized"), None);
+
     Ok(())
+}
+
+// ── Local session repository commands ───────────────────────────────────────
+
+/// Create a local session record in the SQLite repository.
+#[tauri::command]
+pub fn create_local_session(
+    title: Option<String>,
+    mic_path: Option<String>,
+    loopback_path: Option<String>,
+    sample_rate: Option<i64>,
+    recovery_status: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<db::LocalSession, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .create_session(
+            &id,
+            title.as_deref(),
+            mic_path.as_deref(),
+            loopback_path.as_deref(),
+            sample_rate.unwrap_or(16000),
+            recovery_status.as_deref(),
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// Update a local session's metadata.
+#[tauri::command]
+pub fn update_local_session(
+    session_id: String,
+    title: Option<String>,
+    status: Option<String>,
+    ended_at: Option<String>,
+    duration_secs: Option<f64>,
+    recovery_status: Option<String>,
+    error_code: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<db::LocalSession, String> {
+    state
+        .db
+        .update_session(
+            &session_id,
+            title.as_deref(),
+            status.as_deref(),
+            ended_at.as_deref(),
+            duration_secs,
+            recovery_status.as_deref(),
+            error_code.as_deref(),
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// List local sessions, optionally filtered by status.
+#[tauri::command]
+pub fn list_local_sessions(
+    status: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<db::LocalSession>, String> {
+    state
+        .db
+        .list_sessions(status.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// Get a single local session by ID.
+#[tauri::command]
+pub fn get_local_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<db::LocalSession, String> {
+    state.db.get_session(&session_id).map_err(|e| e.to_string())
+}
+
+/// Save analysis results (analysis entries + memory candidates) for a session.
+#[tauri::command]
+pub fn save_analysis_results(
+    session_id: String,
+    results: Vec<db::AnalysisResult>,
+    memory_candidates: Vec<db::MemoryCandidate>,
+    state: State<'_, AppState>,
+) -> Result<db::AnalysisResultsBundle, String> {
+    state
+        .db
+        .save_analysis_results(&session_id, &results, &memory_candidates)
+        .map_err(|e| e.to_string())
+}
+
+/// Get all analysis results and memory candidates for a session.
+#[tauri::command]
+pub fn get_analysis_results(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<db::AnalysisResultsBundle, String> {
+    state
+        .db
+        .get_analysis_results(&session_id)
+        .map_err(|e| e.to_string())
 }
