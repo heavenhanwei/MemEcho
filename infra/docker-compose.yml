@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    ports:
+      - "8787:8787"
+    env_file:
+      - ../.env
+    volumes:
+      - memecho-data:/tmp/memecho
+    restart: unless-stopped
+
+volumes:
+  memecho-data:

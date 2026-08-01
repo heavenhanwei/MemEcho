@@ -34,14 +34,25 @@ from .models import (
     UploadCreated,
 )
 from .orchestrator import Orchestrator
-from .providers import BailianProvider, MockProvider
+from .providers import (
+    AliyunOSSClient,
+    BailianProvider,
+    DashScopeClient,
+    MockProvider,
+    TranscriptionDownloader,
+)
 from .store import MemoryStore, UploadRecord
 
 
 settings = get_settings()
 store = MemoryStore(settings.memecho_data_dir)
-provider = BailianProvider(settings) if settings.memecho_provider == "bailian" else MockProvider()
-orchestrator = Orchestrator(store, provider)
+
+is_mock = settings.memecho_provider != "bailian"
+provider = BailianProvider(settings) if not is_mock else MockProvider()
+oss_client = AliyunOSSClient(settings, mock=is_mock)
+dashscope_client = DashScopeClient(settings, mock=is_mock)
+transcription_downloader = TranscriptionDownloader(settings, mock=is_mock)
+orchestrator = Orchestrator(store, provider, oss_client, dashscope_client, transcription_downloader)
 
 
 @asynccontextmanager
@@ -279,4 +290,3 @@ async def live_transcript(websocket: WebSocket, session_id: str, token: str):
                 return
     except WebSocketDisconnect:
         return
-
