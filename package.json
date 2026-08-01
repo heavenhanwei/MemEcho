@@ -1,0 +1,14 @@
+{
+  "name": "memecho-desktop-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --filter @memecho/desktop dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "tauri": "pnpm --filter @memecho/desktop tauri"
+  }
+}
+

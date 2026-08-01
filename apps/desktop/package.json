@@ -1,0 +1,38 @@
+{
+  "name": "@memecho/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@memecho/contracts": "workspace:*",
+    "@react-three/drei": "^10.5.0",
+    "@react-three/fiber": "^9.3.0",
+    "@tauri-apps/api": "^2.7.0",
+    "lucide-react": "^0.536.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "three": "^0.179.0",
+    "zustand": "^5.0.7"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.0",
+    "@testing-library/jest-dom": "^6.6.4",
+    "@testing-library/react": "^16.3.0",
+    "@types/react": "^19.1.9",
+    "@types/react-dom": "^19.1.7",
+    "@types/three": "^0.179.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.1.2",
+    "vitest": "^3.2.4"
+  }
+}
+

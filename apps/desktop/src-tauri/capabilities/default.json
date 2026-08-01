@@ -1,0 +1,9 @@
+{
+  "identifier": "default",
+  "description": "Default capability for memEcho desktop",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default"
+  ]
+}

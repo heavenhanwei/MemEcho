@@ -1,0 +1,42 @@
+mod audio;
+mod commands;
+mod credential;
+mod paths;
+mod recovery;
+mod state;
+
+use audio::AudioCapture;
+use parking_lot::Mutex;
+use state::CaptureState;
+use std::sync::Arc;
+
+pub struct AppState {
+    pub capture: Arc<Mutex<CaptureState>>,
+    pub audio: Arc<Mutex<AudioCapture>>,
+    pub sessions_dir: std::path::PathBuf,
+}
+
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .manage(AppState {
+            capture: Arc::new(Mutex::new(CaptureState::new())),
+            audio: Arc::new(Mutex::new(AudioCapture::new())),
+            sessions_dir: paths::sessions_dir(),
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::list_audio_devices,
+            commands::start_capture,
+            commands::pause_capture,
+            commands::resume_capture,
+            commands::stop_capture,
+            commands::list_recoverable_sessions,
+            commands::delete_local_session,
+            commands::recover_session,
+            commands::credential_set,
+            commands::credential_get,
+            commands::credential_delete,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running memEcho");
+}

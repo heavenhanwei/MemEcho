@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "memecho-gateway"
+version = "0.1.0"
+description = "Privacy-aware Bailian gateway for memEcho Desktop"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn[standard]>=0.35,<1",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.10,<3",
+  "httpx>=0.28,<1",
+  "python-multipart>=0.0.20,<1",
+  "sse-starlette>=2.4,<3",
+  "websockets>=15,<16",
+  "numpy>=2.2,<3",
+  "soundfile>=0.13,<1",
+  "oss2>=2.19,<3"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "respx>=0.22,<1"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/memecho_gateway"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
