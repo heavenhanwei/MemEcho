@@ -210,7 +210,11 @@ export const gateway = {
         marks: [],
       }),
     }),
-  analyze: (sessionId: string, requestId: string) =>
+  analyze: (
+    sessionId: string,
+    requestId: string,
+    source?: { type: "text" | "transcript"; text: string },
+  ) =>
     request<GatewayJob>(`/v1/sessions/${id(sessionId)}/analyze`, {
       method: "POST",
       body: JSON.stringify({
@@ -219,6 +223,7 @@ export const gateway = {
         focus: ["minutes", "content_analysis", "vad", "self_echo"],
         memory_mode: "off",
         language: "zh-CN",
+        ...(source ? { source } : {}),
       }),
     }),
   // Polling remains available as a fallback when SSE disconnects.

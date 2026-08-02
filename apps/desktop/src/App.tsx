@@ -57,6 +57,7 @@ type WorkflowContext = {
   requestId: string;
   localSessionId: string | null;
   uploaded: boolean;
+  source?: { type: "text" | "transcript"; text: string };
   jobId: string | null;
   identityResolved: boolean;
 };
@@ -105,6 +106,7 @@ function NowPage() {
   const [workflowBusy, setWorkflowBusy] = useState(false);
   const [canRetry, setCanRetry] = useState(false);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>("offline");
+  const [textImportBusy, setTextImportBusy] = useState(false);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -514,7 +516,7 @@ function NowPage() {
 
       if (!context.jobId) {
         state.patch({ jobStatus: "queued", progress: 12, stageLabel: "正在提交分析请求" });
-        const job = await gateway.analyze(context.gatewaySessionId, context.requestId);
+        const job = await gateway.analyze(context.gatewaySessionId, context.requestId, context.source);
         context.jobId = job.id;
         applyJobProgress(job);
       }
@@ -542,6 +544,45 @@ function NowPage() {
       }
     } finally {
       setWorkflowBusy(false);
+    }
+  }
+
+  async function importTextFile(file: File) {
+    if (state.soulState !== "idle" || textImportBusy) return;
+    setError("");
+    setTextImportBusy(true);
+    try {
+      const text = await file.text();
+      if (!text.trim()) throw new Error("文本内容不能为空");
+      const title = file.name.replace(/\.[^.]+$/, "").trim() || "文本回声";
+      const imported = isTauri
+        ? await bridge.importTextContent(text, title, file.name)
+        : null;
+      const session = await gateway.createSession(title, "import");
+      const context: WorkflowContext = {
+        gatewaySessionId: session.id,
+        requestId: session.request_id,
+        localSessionId: imported?.session.id ?? null,
+        uploaded: true,
+        source: { type: "text", text },
+        jobId: null,
+        identityResolved: false,
+      };
+      workflow.current = context;
+      localSessionId.current = context.localSessionId;
+      state.patch({
+        sessionId: session.id,
+        requestId: session.request_id,
+        soulState: "processing",
+        progress: 4,
+        stageLabel: "正在导入文本，准备分析",
+        caption: text.slice(0, 120),
+      });
+      await runWorkflow(context);
+    } catch (cause) {
+      setError(describeError(cause, "文本导入失败"));
+    } finally {
+      setTextImportBusy(false);
     }
   }
 
@@ -822,13 +863,24 @@ function NowPage() {
           </span>
           <input type="file" accept="audio/*,video/*" hidden />
         </label>
-        <button className="quick-card">
+        <label className={`quick-card ${textImportBusy ? "disabled" : ""}`}>
           <FileAudio size={21} />
           <span>
             <b>分析文本</b>
             <small>会议转写或个人独白</small>
           </span>
-        </button>
+          <input
+            type="file"
+            accept=".txt,.md,text/plain,text/markdown"
+            hidden
+            disabled={textImportBusy}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.currentTarget.value = "";
+              if (file) void importTextFile(file);
+            }}
+          />
+        </label>
       </div>
       {error && <p className="error-banner">{error}</p>}
     </section>

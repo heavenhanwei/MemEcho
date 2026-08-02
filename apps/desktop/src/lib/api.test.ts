@@ -29,6 +29,21 @@ afterEach(() => {
 });
 
 describe("gateway session analysis APIs", () => {
+  it("includes imported text as the text-only source contract", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(responseJson({
+      id: "job-1", session_id: "session-1", request_id: "request-1",
+      status: "queued", progress: 0, stage_label: "queued", retryable: false,
+      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await gateway.analyze("session-1", "request-1", {
+      type: "text", text: "事实、观点与态度",
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.source).toEqual({ type: "text", text: "事实、观点与态度" });
+    expect(body.focus).toContain("content_analysis");
+  });
+
   it("loads candidates, resolves snake_case identity, artifacts, and result", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(responseJson({ candidates: [{
