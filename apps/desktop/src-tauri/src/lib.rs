@@ -4,7 +4,9 @@ pub mod credential;
 pub mod db;
 mod paths;
 mod recovery;
+pub mod report;
 mod state;
+pub mod upload;
 
 use audio::AudioCapture;
 use parking_lot::Mutex;
@@ -49,6 +51,8 @@ pub fn run() {
             commands::get_local_session,
             commands::save_analysis_results,
             commands::get_analysis_results,
+            commands::upload_session_tracks,
+            commands::save_report_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running memEcho");

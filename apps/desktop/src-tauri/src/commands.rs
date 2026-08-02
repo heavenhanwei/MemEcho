@@ -2,7 +2,9 @@ use crate::audio::capture::AudioBackend;
 use crate::audio::AudioDevice;
 use crate::db;
 use crate::recovery::{RecoveryMeta, RecoveryStatus};
+use crate::report::SavedReportFiles;
 use crate::state::RecordingStatus;
+use crate::upload::UploadSessionTracksResult;
 use crate::AppState;
 use std::path::PathBuf;
 use tauri::State;
@@ -383,4 +385,56 @@ pub fn get_analysis_results(
         .db
         .get_analysis_results(&session_id)
         .map_err(|e| e.to_string())
+}
+
+/// Upload session audio tracks to the gateway.
+///
+/// Validates IDs and URL, reads gateway token from Windows Credential Manager,
+/// streams SHA-256 checksums, uploads chunks with retry, and verifies completion.
+#[tauri::command]
+pub async fn upload_session_tracks(
+    local_session_id: String,
+    gateway_session_id: String,
+    gateway_base_url: String,
+    state: State<'_, AppState>,
+) -> Result<UploadSessionTracksResult, String> {
+    crate::upload::upload_session_tracks_impl(
+        local_session_id,
+        gateway_session_id,
+        gateway_base_url,
+        &state.sessions_dir,
+    )
+    .await
+    .map_err(|e| {
+        // Redact token-related errors
+        let msg = e.to_string();
+        if msg.contains("gateway_token") || msg.contains("bearer") {
+            "authentication error (details redacted)".to_string()
+        } else {
+            msg
+        }
+    })
+}
+
+/// Save report files (JSON, Markdown, HTML) for a session.
+///
+/// Validates the session, enforces size limits, atomically writes files,
+/// and updates the SQLite analysis record.
+#[tauri::command]
+pub fn save_report_files(
+    local_session_id: String,
+    analysis_json: String,
+    markdown: String,
+    html: String,
+    state: State<'_, AppState>,
+) -> Result<SavedReportFiles, String> {
+    crate::report::save_report_files_impl(
+        &local_session_id,
+        &analysis_json,
+        &markdown,
+        &html,
+        &state.sessions_dir,
+        &state.db,
+    )
+    .map_err(|e| e.to_string())
 }
