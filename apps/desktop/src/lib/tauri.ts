@@ -51,6 +51,35 @@ export interface RecoveryMeta {
   error_code?: string | null;
 }
 
+export interface UploadedTrack {
+  track: string;
+  upload_id: string;
+  size: number;
+  sha256: string;
+}
+
+export interface UploadSessionTracksResult {
+  uploads: UploadedTrack[];
+  total_bytes: number;
+}
+
+export interface SavedReportFiles {
+  json_path: string;
+  markdown_path: string;
+  html_path: string;
+}
+
+export class DesktopRuntimeRequiredError extends Error {
+  constructor(operation: string) {
+    super(`${operation} is available only in the installed memEcho desktop app.`);
+    this.name = "DesktopRuntimeRequiredError";
+  }
+}
+
+function requireDesktopRuntime(operation: string): void {
+  if (!isTauriRuntime()) throw new DesktopRuntimeRequiredError(operation);
+}
+
 /**
  * Typed wrappers over the Tauri IPC commands registered in `lib.rs`.
  * Argument keys are camelCase; Tauri maps them to the Rust snake_case params.
@@ -88,4 +117,32 @@ export const bridge = {
 
   credentialDelete: (name: string) =>
     invoke<void>("credential_delete", { name }),
+
+  uploadSessionTracks: async (
+    localSessionId: string,
+    gatewaySessionId: string,
+    gatewayBaseUrl: string,
+  ): Promise<UploadSessionTracksResult> => {
+    requireDesktopRuntime("Audio upload");
+    return invoke<UploadSessionTracksResult>("upload_session_tracks", {
+      localSessionId,
+      gatewaySessionId,
+      gatewayBaseUrl,
+    });
+  },
+
+  saveReportFiles: async (
+    localSessionId: string,
+    analysisJson: string,
+    markdown: string,
+    html: string,
+  ): Promise<SavedReportFiles> => {
+    requireDesktopRuntime("Report persistence");
+    return invoke<SavedReportFiles>("save_report_files", {
+      localSessionId,
+      analysisJson,
+      markdown,
+      html,
+    });
+  },
 };

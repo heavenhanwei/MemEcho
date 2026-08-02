@@ -132,3 +132,59 @@ describe("bridge recovery + credential commands", () => {
     ]);
   });
 });
+
+describe("bridge desktop persistence commands", () => {
+  it("forwards upload arguments and preserves snake_case response fields", async () => {
+    const response = {
+      uploads: [
+        { track: "microphone", upload_id: "up-1", size: 42, sha256: "a".repeat(64) },
+      ],
+      total_bytes: 42,
+    };
+    const calls = installMock((cmd) => (cmd === "upload_session_tracks" ? response : null));
+
+    await expect(
+      bridge.uploadSessionTracks("local-1", "gateway-1", "https://gateway.example"),
+    ).resolves.toEqual(response);
+    expect(calls[0]).toEqual({
+      cmd: "upload_session_tracks",
+      args: {
+        localSessionId: "local-1",
+        gatewaySessionId: "gateway-1",
+        gatewayBaseUrl: "https://gateway.example",
+      },
+    });
+  });
+
+  it("forwards report content and preserves snake_case paths", async () => {
+    const response = {
+      json_path: "C:\\reports\\report.json",
+      markdown_path: "C:\\reports\\report.md",
+      html_path: "C:\\reports\\report.html",
+    };
+    const calls = installMock((cmd) => (cmd === "save_report_files" ? response : null));
+
+    await expect(
+      bridge.saveReportFiles("local-2", "{\"ok\":true}", "# Report", "<h1>Report</h1>"),
+    ).resolves.toEqual(response);
+    expect(calls[0]).toEqual({
+      cmd: "save_report_files",
+      args: {
+        localSessionId: "local-2",
+        analysisJson: "{\"ok\":true}",
+        markdown: "# Report",
+        html: "<h1>Report</h1>",
+      },
+    });
+  });
+
+  it("explicitly rejects desktop-only persistence in a plain browser", async () => {
+    clearMocks();
+    await expect(
+      bridge.uploadSessionTracks("local", "gateway", "https://gateway.example"),
+    ).rejects.toMatchObject({ name: "DesktopRuntimeRequiredError" });
+    await expect(
+      bridge.saveReportFiles("local", "{}", "", ""),
+    ).rejects.toThrow("installed memEcho desktop app");
+  });
+});
