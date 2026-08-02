@@ -19,6 +19,30 @@ class JobStatus(StrEnum):
     failed = "failed"
 
 
+class ParticipantCandidate(BaseModel):
+    participant_id: str
+    display_name: str
+    source: Literal["diarization", "user_provided", "imported"]
+    speaking_time_ms: int
+    segment_count: int
+
+
+class ParticipantsCandidatesResponse(BaseModel):
+    candidates: list[ParticipantCandidate]
+
+
+class ArtifactMetadata(BaseModel):
+    type: Literal["json", "markdown", "html"]
+    content_type: str
+    size_bytes: int
+    sha256: str
+
+
+class ArtifactsResponse(BaseModel):
+    artifacts: dict[str, ArtifactMetadata]
+    contents: dict[str, str]
+
+
 class SessionCreate(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     context: str = Field(default="工作", max_length=80)
@@ -49,7 +73,7 @@ class UploadCreated(BaseModel):
 
 class UploadComplete(BaseModel):
     upload_id: str
-    sha256: str
+    sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
 
 
 class ParticipantResolution(BaseModel):

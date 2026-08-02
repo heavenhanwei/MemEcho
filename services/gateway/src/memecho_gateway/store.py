@@ -32,6 +32,9 @@ class SessionRecord:
     uploads: dict[str, UploadRecord] = field(default_factory=dict)
     participant_resolution: dict[str, Any] | None = None
     result: dict[str, Any] | None = None
+    analysis_requests: dict[str, dict[str, Any]] = field(default_factory=dict)
+    job_intermediates: dict[str, dict[str, Any]] = field(default_factory=dict)
+    resume_scheduled_jobs: set[str] = field(default_factory=set)
 
 
 class MemoryStore:

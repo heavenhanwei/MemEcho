@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import asyncio
 import hashlib
 import json
@@ -23,10 +24,15 @@ from . import __version__
 from .config import Settings, get_settings
 from .models import (
     AnalyzeRequest,
+    ArtifactMetadata,
+    ArtifactsResponse,
     ChatRequest,
     Health,
+    JobStatus,
     JobView,
+    ParticipantCandidate,
     ParticipantResolution,
+    ParticipantsCandidatesResponse,
     SessionCreate,
     SessionCreated,
     UploadComplete,
@@ -46,6 +52,40 @@ from .store import MemoryStore, UploadRecord
 
 settings = get_settings()
 store = MemoryStore(settings.memecho_data_dir)
+
+SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]")
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
+
+
+def safe_filename(name: str) -> str:
+    """Return a cross-platform leaf name that is also safe on Windows."""
+    leaf = name.replace("\\", "/").rsplit("/", 1)[-1]
+    if not leaf or leaf in {".", ".."}:
+        return "upload"
+    leaf = SAFE_FILENAME_RE.sub("_", leaf.strip().replace(" ", "_"))
+    leaf = leaf.replace("..", "_").rstrip(" .")[:255].rstrip(" .")
+    if not leaf or leaf in {".", ".."}:
+        return "upload"
+    if leaf.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+        leaf = f"_{leaf}"
+    return leaf[:255].rstrip(" .") or "upload"
+
+
+def awaiting_identity_job(session_id: str) -> JobView | None:
+    jobs = (
+        job
+        for job in store.jobs.values()
+        if job.session_id == session_id and job.status == JobStatus.awaiting_identity
+    )
+    return max(jobs, key=lambda job: job.updated_at, default=None)
+
 
 is_mock = settings.memecho_provider != "bailian"
 provider = BailianProvider(settings) if not is_mock else MockProvider()
@@ -106,11 +146,12 @@ async def create_upload(session_id: str, payload: UploadCreate) -> UploadCreated
     upload_id = f"upl_{uuid4().hex[:16]}"
     directory = settings.memecho_data_dir / session_id / upload_id
     directory.mkdir(parents=True, exist_ok=True)
+    safe_name = safe_filename(payload.file_name)
     record = UploadRecord(
         upload_id,
         session_id,
         payload.track,
-        payload.file_name,
+        safe_name,
         payload.mime_type,
         payload.size,
         payload.sha256.lower(),
@@ -135,10 +176,29 @@ async def put_chunk(
     upload = session.uploads.get(upload_id) if session else None
     if not upload:
         raise HTTPException(status_code=404, detail="upload not found")
-    body = await request.body()
-    if len(body) > settings.chunk_size_bytes:
-        raise HTTPException(status_code=413, detail="chunk too large")
-    (upload.directory / f"{index:08d}.part").write_bytes(body)
+    if index < 0:
+        raise HTTPException(status_code=422, detail="chunk index must be non-negative")
+    expected_chunks = (upload.size + settings.chunk_size_bytes - 1) // settings.chunk_size_bytes
+    if index >= expected_chunks:
+        raise HTTPException(status_code=422, detail="chunk index exceeds expected upload size")
+
+    chunk = bytearray()
+    async for piece in request.stream():
+        if len(chunk) + len(piece) > settings.chunk_size_bytes:
+            raise HTTPException(status_code=413, detail="chunk too large")
+        chunk.extend(piece)
+    body = bytes(chunk)
+    if not body:
+        raise HTTPException(status_code=422, detail="chunk must not be empty")
+
+    part_path = upload.directory / f"{index:08d}.part"
+    if part_path.exists():
+        # Idempotent: only identical bytes are accepted for a duplicate index
+        if part_path.read_bytes() != body:
+            raise HTTPException(status_code=409, detail="chunk content mismatch")
+        upload.chunks.add(index)
+        return {"ok": True, "index": index}
+    part_path.write_bytes(body)
     upload.chunks.add(index)
     return {"ok": True, "index": index}
 
@@ -154,6 +214,24 @@ async def complete_upload(
     upload = session.uploads.get(upload_id) if session else None
     if not upload:
         raise HTTPException(status_code=404, detail="upload not found")
+    if payload.upload_id != upload_id:
+        raise HTTPException(status_code=422, detail="payload upload_id does not match url")
+    if payload.sha256.lower() != upload.sha256:
+        raise HTTPException(status_code=422, detail="payload sha256 does not match upload declaration")
+
+    # Idempotent: if already completed, return existing result with sha256
+    if upload.completed_path and upload.completed_path.exists():
+        return {
+            "upload_id": upload_id,
+            "path": f"asset://{upload_id}",
+            "size": upload.completed_path.stat().st_size,
+            "sha256": upload.sha256,
+        }
+
+    expected_chunks = (upload.size + settings.chunk_size_bytes - 1) // settings.chunk_size_bytes
+    if upload.chunks != set(range(expected_chunks)):
+        raise HTTPException(status_code=409, detail="upload is incomplete")
+
     target = upload.directory / upload.file_name
     digest = hashlib.sha256()
     size = 0
@@ -167,9 +245,15 @@ async def complete_upload(
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail="upload checksum mismatch")
     upload.completed_path = target
+    upload.sha256 = digest.hexdigest()
     for part in upload.directory.glob("*.part"):
         part.unlink(missing_ok=True)
-    return {"upload_id": upload_id, "path": f"asset://{upload_id}", "size": size}
+    return {
+        "upload_id": upload_id,
+        "path": f"asset://{upload_id}",
+        "size": size,
+        "sha256": digest.hexdigest(),
+    }
 
 
 @app.post(
@@ -177,13 +261,60 @@ async def complete_upload(
     dependencies=[Depends(require_token)],
 )
 async def resolve_participants(
-    session_id: str, payload: ParticipantResolution
+    session_id: str, payload: ParticipantResolution, background: BackgroundTasks
 ) -> dict[str, bool]:
     session = store.sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="session not found")
     session.participant_resolution = payload.model_dump()
+
+    job = awaiting_identity_job(session_id)
+    if job and job.id not in session.resume_scheduled_jobs:
+        original_request = session.analysis_requests.get(job.id)
+        if original_request is None:
+            raise HTTPException(status_code=409, detail="analysis request is unavailable")
+        session.resume_scheduled_jobs.add(job.id)
+        background.add_task(
+            orchestrator.run, job.id, session_id, original_request.copy()
+        )
+
     return {"ok": True}
+
+
+@app.get(
+    "/v1/sessions/{session_id}/participants/candidates",
+    response_model=ParticipantsCandidatesResponse,
+    dependencies=[Depends(require_token)],
+)
+async def get_participant_candidates(session_id: str) -> ParticipantsCandidatesResponse:
+    session = store.sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    candidates: list[ParticipantCandidate] = []
+    job = awaiting_identity_job(session_id)
+    aligned = session.job_intermediates.get(job.id, {}).get("aligned", []) if job else []
+    speaker_stats: dict[str, dict[str, int]] = {}
+    for segment in aligned:
+        speaker_id = str(segment.get("speaker_id", "unknown"))
+        stats = speaker_stats.setdefault(speaker_id, {"time_ms": 0, "count": 0})
+        stats["time_ms"] += max(
+            0, int(segment.get("end_ms", 0)) - int(segment.get("start_ms", 0))
+        )
+        stats["count"] += 1
+
+    for speaker_id, stats in speaker_stats.items():
+        candidates.append(
+            ParticipantCandidate(
+                participant_id=speaker_id,
+                display_name=f"Speaker {speaker_id}",
+                source="diarization",
+                speaking_time_ms=stats["time_ms"],
+                segment_count=stats["count"],
+            )
+        )
+
+    return ParticipantsCandidatesResponse(candidates=candidates)
 
 
 @app.post(
@@ -197,9 +328,12 @@ async def analyze(
     if session_id not in store.sessions:
         raise HTTPException(status_code=404, detail="session not found")
     job = await store.create_job(session_id, payload.request_id)
-    if job.status == "queued":
+    original_request = store.sessions[session_id].analysis_requests.setdefault(
+        job.id, payload.model_dump()
+    )
+    if job.status == JobStatus.queued:
         background.add_task(
-            orchestrator.run, job.id, session_id, payload.model_dump()
+            orchestrator.run, job.id, session_id, original_request.copy()
         )
     return job
 
@@ -242,6 +376,63 @@ async def get_result(session_id: str) -> dict:
     if not session.result:
         raise HTTPException(status_code=409, detail="result not ready")
     return session.result
+
+
+@app.get(
+    "/v1/sessions/{session_id}/artifacts",
+    response_model=ArtifactsResponse,
+    dependencies=[Depends(require_token)],
+)
+async def get_artifacts(session_id: str) -> ArtifactsResponse:
+    session = store.sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="session not found")
+    if not session.result:
+        raise HTTPException(status_code=409, detail="result not ready")
+
+    result = session.result
+    artifacts: dict[str, ArtifactMetadata] = {}
+    contents: dict[str, str] = {}
+
+    # JSON artifact (bare AnalysisResult without rendered fields)
+    json_result = {
+        key: value
+        for key, value in result.items()
+        if key not in {"rendered_markdown", "rendered_html"}
+    }
+    json_content = json.dumps(json_result, ensure_ascii=False)
+    json_bytes = json_content.encode("utf-8")
+    artifacts["json"] = ArtifactMetadata(
+        type="json",
+        content_type="application/json",
+        size_bytes=len(json_bytes),
+        sha256=hashlib.sha256(json_bytes).hexdigest(),
+    )
+    contents["json"] = json_content
+
+    # Markdown artifact
+    md_content = result.get("rendered_markdown", "")
+    md_bytes = md_content.encode("utf-8")
+    artifacts["markdown"] = ArtifactMetadata(
+        type="markdown",
+        content_type="text/markdown",
+        size_bytes=len(md_bytes),
+        sha256=hashlib.sha256(md_bytes).hexdigest(),
+    )
+    contents["markdown"] = md_content
+
+    # HTML artifact
+    html_content = result.get("rendered_html", "")
+    html_bytes = html_content.encode("utf-8")
+    artifacts["html"] = ArtifactMetadata(
+        type="html",
+        content_type="text/html",
+        size_bytes=len(html_bytes),
+        sha256=hashlib.sha256(html_bytes).hexdigest(),
+    )
+    contents["html"] = html_content
+
+    return ArtifactsResponse(artifacts=artifacts, contents=contents)
 
 
 @app.post("/v1/chat/stream", dependencies=[Depends(require_token)])
