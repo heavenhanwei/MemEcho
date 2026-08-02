@@ -334,6 +334,16 @@ async def analyze(
 ) -> JobView:
     if session_id not in store.sessions:
         raise HTTPException(status_code=404, detail="session not found")
+    session = store.sessions[session_id]
+    if (
+        payload.source is not None
+        and payload.source.type in {"text", "transcript"}
+        and session.uploads
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="text source cannot be combined with media uploads",
+        )
     job = await store.create_job(session_id, payload.request_id)
     original_request = store.sessions[session_id].analysis_requests.setdefault(
         job.id, payload.model_dump()

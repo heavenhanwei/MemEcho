@@ -11,6 +11,11 @@ from .models import JobStatus
 from .providers.oss import make_oss_key
 from .quality import compute_quality_metrics, conservative_evidence_weights
 from .rendering import render_html, render_markdown
+from .text_only import (
+    build_text_segments,
+    enforce_text_only_metadata,
+    is_text_only_request,
+)
 from .store import MemoryStore
 
 log = logging.getLogger(__name__)
@@ -62,6 +67,75 @@ class Orchestrator:
                 collected["transcript"] = value.get("transcript", [])
         return collected
 
+    async def _run_text_only(
+        self, job_id: str, session: Any, request: dict[str, Any]
+    ) -> None:
+        source = request.get("source") or {}
+        text = source.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text-only analysis requires non-empty source.text")
+
+        await self.store.update_job(
+            job_id, JobStatus.aligning, 48, "Preparing text evidence"
+        )
+        text_segments = build_text_segments(text)
+        if not text_segments:
+            raise ValueError("text-only analysis produced no usable text segments")
+
+        evidence_weights = {
+            "quality_tier": "text_only",
+            "linguistic_weight": 1.0,
+            "acoustic_weight": 0.0,
+            "aggregation": "text_only",
+        }
+        observations = {
+            "text_segments": text_segments,
+            "aligned_segments": [],
+            "acoustic_metrics": [],
+            "model_errors": [],
+            "evidence_weights": evidence_weights,
+        }
+        session.job_intermediates[job_id] = {
+            "text_segments": text_segments,
+            "aligned": [],
+            "quality_metrics": [],
+            "tracks": [],
+            "track_labels": [],
+            "model_errors": [],
+            "evidence_weights": evidence_weights,
+        }
+
+        await self.store.update_job(
+            job_id, JobStatus.analyzing, 66, "Qwen3.7 is analyzing text"
+        )
+        session.resume_scheduled_jobs.discard(job_id)
+        result = await self.provider.analyze(
+            session={
+                "id": session.id,
+                "title": session.create.title,
+                "context": session.create.context,
+                "occurred_at": session.create.occurred_at.isoformat(),
+                "participant_resolution": session.participant_resolution,
+                "observations": observations,
+            },
+            tracks=[],
+            request=request,
+        )
+        enforce_text_only_metadata(result)
+        result["_evidence_weights"] = evidence_weights
+
+        errors = validate_result(result, text_segments=text_segments)
+        if errors:
+            raise ValueError("; ".join(errors))
+
+        await self.store.update_job(
+            job_id, JobStatus.rendering, 90, "Rendering local report"
+        )
+        result["rendered_markdown"] = render_markdown(result)
+        result["rendered_html"] = render_html(result)
+        session.result = result
+        await self.store.update_job(job_id, JobStatus.complete, 100, "Report complete")
+
     async def run(self, job_id: str, session_id: str, request: dict[str, Any]) -> None:
         session = self.store.sessions[session_id]
         request = session.analysis_requests.get(job_id, request)
@@ -69,6 +143,9 @@ class Orchestrator:
         try:
             job = self.store.jobs[job_id]
             is_resume = job.status == JobStatus.awaiting_identity
+            if is_text_only_request(request):
+                await self._run_text_only(job_id, session, request)
+                return
 
             if not is_resume:
                 await self.store.update_job(job_id, JobStatus.transcribing, 20, "正式转写与说话人分离")

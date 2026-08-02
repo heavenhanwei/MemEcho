@@ -2,12 +2,139 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..text_only import build_text_segments
+
+
+def _mock_text_only_result(
+    session: dict[str, Any], request: dict[str, Any]
+) -> dict[str, Any]:
+    observations = session.get("observations") or {}
+    segments = observations.get("text_segments") or []
+    if not segments:
+        source = request.get("source") or {}
+        segments = build_text_segments(source.get("text") or "mock text input")
+
+    participants = request.get("participants") or [
+        {"id": "speaker_self", "name": "Self", "is_self": True}
+    ]
+    self_participant = next(
+        (participant for participant in participants if participant.get("is_self")),
+        None,
+    )
+    self_participant_id = self_participant.get("id") if self_participant else None
+    identity_basis = request.get("self_identity_basis") or "unknown"
+    evidence = [
+        {
+            "id": segment["evidence_id"],
+            "source_type": "transcript",
+            "speaker_id": None,
+            "start_ms": 0,
+            "end_ms": 0,
+            "segment_id": segment["segment_id"],
+            "excerpt": segment["text"],
+            "quality_flags": list(segment.get("quality_flags") or []),
+        }
+        for segment in segments
+    ]
+    vad_series = [
+        {
+            "participant_id": self_participant_id or participants[0]["id"],
+            "segment_id": segment["segment_id"],
+            "v": 0.0,
+            "a": 0.0,
+            "d": 0.0,
+            "scale": "-1..1",
+            "confidence": 0.5,
+            "linguistic_weight": 1.0,
+            "acoustic_weight": 0.0,
+            "evidence_refs": [segment["evidence_id"]],
+        }
+        for segment in segments
+    ]
+    first_evidence_id = evidence[0]["id"]
+
+    return {
+        "schema_version": "1.1",
+        "request_id": request["request_id"],
+        "analysis_mode": "text_only",
+        "scope": {
+            "single_session": True,
+            "signals_used": ["transcript", "linguistic"],
+            "signals_missing": [
+                "acoustic",
+                "pitch",
+                "energy",
+                "speech_rate",
+                "voice_quality",
+            ],
+            "quality": 0.75,
+            "target_participant_ids": request.get("target_participant_ids")
+            or [participant["id"] for participant in participants],
+            "self_participant_id": self_participant_id,
+            "self_identity_basis": identity_basis,
+        },
+        "minutes": {
+            "summary": f"The submitted text contains {len(segments)} stable evidence segment(s).",
+            "focus": [],
+            "consensus": [],
+            "disagreements": [],
+            "explicit_actions": [],
+            "recommendations": [],
+        },
+        "content_analysis": [
+            {
+                "participant_id": participant["id"],
+                "fact_claims": [],
+                "opinions": [],
+                "attitudes": [],
+                "influence_summary": [],
+            }
+            for participant in participants
+        ],
+        "participants": participants,
+        "vad_series": vad_series,
+        "interaction_events": [],
+        "self_echo": {
+            "participant_id": self_participant_id,
+            "identity_basis": identity_basis,
+            "effects": [],
+            "alternatives": [],
+        },
+        "coaching": {"enabled": False, "status": "not_requested", "scenes": []},
+        "insights": [
+            {
+                "id": "in_text_segments",
+                "claim": f"The input was divided into {len(segments)} text segment(s).",
+                "claim_level": "computed",
+                "confidence": 1.0,
+                "evidence_refs": [first_evidence_id],
+                "alternatives": [
+                    "Paragraph boundaries depend on the submitted line breaks."
+                ],
+            }
+        ],
+        "evidence": evidence,
+        "uncertainties": [
+            "Text-only mode cannot evaluate pitch, energy, pace, pauses, or voice quality."
+        ],
+        "provenance": {
+            "skill_version": "1.0.2",
+            "service_version": "0.1.0",
+            "model_manifest": [
+                {"provider": "mock", "model": "deterministic-text-demo"}
+            ],
+        },
+        "memory": {"written": False, "consent_basis": None},
+    }
+
 
 class MockProvider:
     async def analyze(
         self, session: dict[str, Any], tracks: list[str], request: dict[str, Any]
     ) -> dict[str, Any]:
         request_id = request["request_id"]
+        if not tracks:
+            return _mock_text_only_result(session, request)
         return {
             "schema_version": "1.1",
             "request_id": request_id,

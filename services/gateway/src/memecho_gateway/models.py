@@ -106,6 +106,14 @@ class AnalysisSource(StrictRequest):
 
     @model_validator(mode="after")
     def has_exactly_one_locator(self) -> "AnalysisSource":
+        if self.type in {"text", "transcript"}:
+            if self.text is None or not self.text.strip():
+                raise ValueError("text and transcript sources require non-empty source.text")
+            if len(self.text.encode("utf-8")) > 5 * 1024 * 1024:
+                raise ValueError("source.text exceeds the 5 MiB UTF-8 limit")
+        elif self.path is None or not self.path.strip():
+            raise ValueError("audio and video sources require non-empty source.path")
+
         if bool(self.text) == bool(self.path):
             raise ValueError("exactly one of source.text or source.path is required")
         return self

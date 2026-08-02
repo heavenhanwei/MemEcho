@@ -12,14 +12,16 @@ async def test_mock_provider_result_passes_contract():
     assert errors == []
 
 
-async def test_mock_provider_text_only_mode_acoustic_weight_flagged():
+async def test_mock_provider_text_only_mode_is_contract_safe():
     result = await MockProvider().analyze(
         {"title": "test"}, [], {"request_id": "req_test"}
     )
     assert result["analysis_mode"] == "text_only"
     errors = validate_result(result)
-    acoustic_errors = [e for e in errors if "acoustic_weight" in e]
-    assert len(acoustic_errors) == 3
+    assert errors == []
+    assert "acoustic" in result["scope"]["signals_missing"]
+    assert all(point["linguistic_weight"] == 1 for point in result["vad_series"])
+    assert all(point["acoustic_weight"] == 0 for point in result["vad_series"])
 
 
 async def test_valid_text_only_result_passes_contract():

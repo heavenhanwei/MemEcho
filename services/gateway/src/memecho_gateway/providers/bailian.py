@@ -15,6 +15,16 @@ SYSTEM_PROMPT = """你是 memEcho 对话分析服务。只分析可观察的表�
 VAD 表示情境中的表达状态，不表示真实内心。仅可使用输入中明确提供的语言和声学证据。"""
 
 
+TEXT_ONLY_PROMPT = """TEXT-ONLY MODE: no audio or acoustic observation is available.
+Set analysis_mode=text_only. Use only transcript and linguistic signals; list acoustic, pitch,
+energy, speech_rate, and voice_quality in scope.signals_missing. Every VAD point must use
+linguistic_weight=1 and acoustic_weight=0. Do not mention inferred pitch, loudness, pace,
+pauses, voice quality, or audio emotion. Evidence must use only the exact evidence_id,
+segment_id, and verbatim excerpt from session.observations.text_segments, with
+source_type=transcript. If the text does not support a conclusion, omit it or record the
+uncertainty instead of inventing evidence."""
+
+
 class BailianProvider:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -53,6 +63,11 @@ class BailianProvider:
     async def analyze(
         self, session: dict[str, Any], tracks: list[str], request: dict[str, Any]
     ) -> dict[str, Any]:
+        source = request.get("source") or {}
+        system_prompt = SYSTEM_PROMPT
+        if source.get("type") in {"text", "transcript"}:
+            system_prompt = f"{SYSTEM_PROMPT}\n\n{TEXT_ONLY_PROMPT}"
+
         # Audio adapters write normalized observations into session before this call.
         prompt = json.dumps(
             {"session": session, "tracks": tracks, "request": request},
@@ -60,7 +75,7 @@ class BailianProvider:
         )
         text = await self._chat_completion(
             [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ]
         )
