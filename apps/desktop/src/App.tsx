@@ -17,7 +17,12 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EchoSphere } from "./components/EchoSphere";
 import { ReportView } from "./components/ReportView";
-import { gateway } from "./lib/api";
+import {
+  gateway,
+  gatewayBaseUrl,
+  type GatewayJob,
+  type ParticipantCandidate,
+} from "./lib/api";
 import {
   bridge,
   isTauriRuntime,
@@ -46,6 +51,19 @@ function describeError(cause: unknown, fallback: string) {
   return fallback;
 }
 
+type WorkflowContext = {
+  gatewaySessionId: string;
+  requestId: string;
+  localSessionId: string | null;
+  uploaded: boolean;
+  jobId: string | null;
+  identityResolved: boolean;
+};
+
+function isAbortError(cause: unknown) {
+  return cause instanceof DOMException && cause.name === "AbortError";
+}
+
 function NowPage() {
   const state = useAppStore();
   const isTauri = isTauriRuntime();
@@ -55,12 +73,20 @@ function NowPage() {
   const socket = useRef<WebSocket | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const backend = useRef<"tauri" | "web">("web");
+  const localSessionId = useRef<string | null>(null);
+  const workflow = useRef<WorkflowContext | null>(null);
+  const progressAbort = useRef<AbortController | null>(null);
   const [source, setSource] = useState<"microphone" | "mixed">("mixed");
   const [error, setError] = useState("");
   const [meterNote, setMeterNote] = useState("");
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [micDeviceId, setMicDeviceId] = useState("");
   const [renderDeviceId, setRenderDeviceId] = useState("");
+  const [identityCandidates, setIdentityCandidates] = useState<ParticipantCandidate[]>([]);
+  const [participantNames, setParticipantNames] = useState<Record<string, string>>({});
+  const [selfParticipantId, setSelfParticipantId] = useState("");
+  const [workflowBusy, setWorkflowBusy] = useState(false);
+  const [canRetry, setCanRetry] = useState(false);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -83,6 +109,7 @@ function NowPage() {
       if (timer.current) window.clearInterval(timer.current);
       stopMeter();
       socket.current?.close();
+      progressAbort.current?.abort();
     },
     [],
   );
@@ -118,6 +145,10 @@ function NowPage() {
     if (state.soulState !== "idle") return;
     setError("");
     setMeterNote("");
+    localSessionId.current = null;
+    workflow.current = null;
+    setIdentityCandidates([]);
+    setCanRetry(false);
     try {
       const session = await gateway.createSession("新的回声", source);
       const ws = new WebSocket(gateway.liveUrl(session.id));
@@ -131,7 +162,11 @@ function NowPage() {
 
       if (isTauri) {
         backend.current = "tauri";
-        await bridge.startCapture(micDeviceId || null, renderDeviceId || null);
+        const capture = await bridge.startCapture(
+          micDeviceId || null,
+          renderDeviceId || null,
+        );
+        localSessionId.current = capture.session_id;
         try {
           const media = await navigator.mediaDevices.getUserMedia({
             audio: { echoCancellation: true, noiseSuppression: true },
@@ -191,55 +226,263 @@ function NowPage() {
     }
   }
 
+  function applyJobProgress(job: GatewayJob) {
+    state.patch({
+      jobId: job.id,
+      jobStatus: job.status,
+      progress: job.progress,
+      stageLabel: job.stage_label,
+    });
+  }
+
+  async function monitorJob(jobId: string, stopOnAwaitingIdentity: boolean) {
+    let latest: GatewayJob | null = null;
+    let stoppedForIdentity = false;
+    const controller = new AbortController();
+    progressAbort.current?.abort();
+    progressAbort.current = controller;
+
+    try {
+      await gateway.jobEvents(
+        jobId,
+        (event) => {
+          latest = event;
+          applyJobProgress(event);
+          if (stopOnAwaitingIdentity && event.status === "awaiting_identity") {
+            stoppedForIdentity = true;
+            controller.abort();
+          }
+        },
+        controller.signal,
+      );
+    } catch (cause) {
+      if (!stoppedForIdentity) {
+        if (isAbortError(cause)) throw cause;
+        state.patch({ stageLabel: "实时进度连接中断，已切换到状态轮询" });
+      }
+    } finally {
+      if (progressAbort.current === controller) progressAbort.current = null;
+    }
+
+    const streamed = latest as GatewayJob | null;
+    if (
+      streamed &&
+      (streamed.status === "complete" ||
+        streamed.status === "failed" ||
+        (stopOnAwaitingIdentity && streamed.status === "awaiting_identity"))
+    ) {
+      return streamed;
+    }
+
+    while (true) {
+      const current = await gateway.job(jobId);
+      applyJobProgress(current);
+      if (
+        current.status === "complete" ||
+        current.status === "failed" ||
+        (stopOnAwaitingIdentity && current.status === "awaiting_identity")
+      ) {
+        return current;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+  }
+
+  async function finishWorkflow(context: WorkflowContext) {
+    state.patch({ stageLabel: "正在读取分析结果与报告文件", progress: 96 });
+    const result = await gateway.result(context.gatewaySessionId);
+    const artifacts = await gateway.artifacts(context.gatewaySessionId);
+
+    if (context.localSessionId) {
+      state.patch({ stageLabel: "正在安全保存本地报告", progress: 98 });
+      await bridge.saveReportFiles(
+        context.localSessionId,
+        artifacts.contents.json || JSON.stringify(result),
+        artifacts.contents.markdown,
+        artifacts.contents.html,
+      );
+    }
+
+    setIdentityCandidates([]);
+    setCanRetry(false);
+    state.patch({
+      result,
+      soulState: "responding",
+      page: "report",
+      progress: 100,
+      stageLabel: context.localSessionId
+        ? "分析完成，报告已保存到本地"
+        : "网页演示分析完成（未写入桌面本地文件）",
+    });
+  }
+
+  function prepareIdentity(candidates: ParticipantCandidate[]) {
+    if (candidates.length === 0) {
+      throw new Error("分析需要确认参与者身份，但没有可用的说话人候选");
+    }
+    setIdentityCandidates(candidates);
+    setParticipantNames(
+      Object.fromEntries(
+        candidates.map((candidate) => [candidate.participant_id, candidate.display_name]),
+      ),
+    );
+    setSelfParticipantId(candidates.length === 1 ? candidates[0].participant_id : "");
+    state.patch({ stageLabel: "请确认参与者，并指定哪一位是我", progress: 55 });
+  }
+
+  async function runWorkflow(context: WorkflowContext) {
+    setWorkflowBusy(true);
+    setError("");
+    setCanRetry(false);
+    state.patch({ soulState: "processing" });
+
+    try {
+      if (context.localSessionId && !context.uploaded) {
+        state.patch({ jobStatus: "uploading", progress: 8, stageLabel: "正在上传本地双轨录音" });
+        await bridge.uploadSessionTracks(
+          context.localSessionId,
+          context.gatewaySessionId,
+          gatewayBaseUrl,
+        );
+        context.uploaded = true;
+      } else if (!context.localSessionId && !context.uploaded) {
+        state.patch({
+          progress: 8,
+          stageLabel: "网页演示模式：跳过桌面音频上传与本地持久化",
+        });
+        context.uploaded = true;
+      }
+
+      if (!context.jobId) {
+        state.patch({ jobStatus: "queued", progress: 12, stageLabel: "正在提交分析请求" });
+        const job = await gateway.analyze(context.gatewaySessionId, context.requestId);
+        context.jobId = job.id;
+        applyJobProgress(job);
+      }
+
+      const current = await monitorJob(context.jobId, !context.identityResolved);
+      if (current.status === "awaiting_identity" && !context.identityResolved) {
+        prepareIdentity(
+          (await gateway.participantCandidates(context.gatewaySessionId)).candidates,
+        );
+        return;
+      }
+      if (current.status === "failed") {
+        if (current.retryable) {
+          context.jobId = null;
+          context.requestId = `${context.requestId}-retry-${Date.now()}`;
+        }
+        throw new Error(current.error_code ?? "分析失败");
+      }
+      await finishWorkflow(context);
+    } catch (cause) {
+      if (!isAbortError(cause)) {
+        setError(describeError(cause, "分析失败"));
+        setCanRetry(true);
+        state.patch({ stageLabel: "当前步骤未完成，可以安全重试" });
+      }
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function confirmIdentity() {
+    let identityResolved = false;
+    const context = workflow.current;
+    if (!context?.jobId || !selfParticipantId || workflowBusy) return;
+    setWorkflowBusy(true);
+    setError("");
+    try {
+      await gateway.resolveParticipants(context.gatewaySessionId, {
+        participants: identityCandidates.map((candidate) => ({
+          id: candidate.participant_id,
+          name: participantNames[candidate.participant_id]?.trim() || candidate.display_name,
+          is_self: candidate.participant_id === selfParticipantId,
+        })),
+        self_participant_id: selfParticipantId,
+        identity_basis: "user_confirmed",
+      });
+      context.identityResolved = true;
+      identityResolved = true;
+      setIdentityCandidates([]);
+      state.patch({ stageLabel: "身份已确认，正在继续同一分析任务" });
+      const current = await monitorJob(context.jobId, false);
+      if (current.status === "failed") {
+        if (current.retryable) {
+          context.jobId = null;
+          context.requestId = `${context.requestId}-retry-${Date.now()}`;
+        }
+        throw new Error(current.error_code ?? "分析失败");
+      }
+      await finishWorkflow(context);
+    } catch (cause) {
+      if (!isAbortError(cause)) {
+        setError(describeError(cause, "身份确认或继续分析失败"));
+        setCanRetry(identityResolved);
+        state.patch({ stageLabel: "当前步骤未完成，可以安全重试" });
+      }
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function retryWorkflow() {
+    if (!workflow.current || workflowBusy) return;
+    await runWorkflow(workflow.current);
+  }
+
   async function stop() {
     if (timer.current) window.clearInterval(timer.current);
     timer.current = undefined;
     setError("");
+
+    let stopFailure: unknown = null;
     try {
       if (backend.current === "tauri") {
-        await bridge.stopCapture();
+        const stopped = await bridge.stopCapture();
+        localSessionId.current = stopped.session_id;
       } else {
         recorder.current?.stop();
         recorder.current = null;
       }
     } catch (cause) {
-      setError(describeError(cause, "停止录音时出现问题"));
+      stopFailure = cause;
     }
+
     stopMeter();
     socket.current?.send("end");
     socket.current?.close();
     socket.current = null;
 
+    if (stopFailure) {
+      setError(describeError(stopFailure, "停止录音时出现问题"));
+      state.patch({ soulState: "idle" });
+      return;
+    }
+
     const { sessionId, requestId } = useAppStore.getState();
+    if (!sessionId || !requestId) {
+      setError("会话信息缺失，无法开始分析");
+      state.patch({ soulState: "idle" });
+      return;
+    }
+
+    const context: WorkflowContext = {
+      gatewaySessionId: sessionId,
+      requestId,
+      localSessionId: backend.current === "tauri" ? localSessionId.current : null,
+      uploaded: false,
+      jobId: null,
+      identityResolved: false,
+    };
+    workflow.current = context;
     state.patch({
       soulState: "processing",
       jobStatus: "queued",
       progress: 0,
-      stageLabel: "录音已结束，正在提交分析请求",
+      stageLabel: "录音已结束，准备上传和分析",
     });
-    if (!sessionId || !requestId) return;
-    try {
-      const job = await gateway.analyze(sessionId, requestId);
-      state.patch({ jobId: job.id });
-      while (true) {
-        const current = await gateway.job(job.id);
-        state.patch({
-          jobStatus: current.status,
-          progress: current.progress,
-          stageLabel: current.stage_label,
-        });
-        if (current.status === "complete") {
-          const result = await gateway.result(sessionId);
-          state.patch({ result, soulState: "responding", page: "report" });
-          break;
-        }
-        if (current.status === "failed") throw new Error(current.error_code ?? "分析失败");
-        await new Promise((resolve) => window.setTimeout(resolve, 350));
-      }
-    } catch (cause) {
-      setError(describeError(cause, "分析失败"));
-      state.patch({ soulState: "idle" });
-    }
+    await runWorkflow(context);
   }
 
   if (state.soulState === "processing") {
@@ -249,10 +492,56 @@ function NowPage() {
         <p className="eyebrow">ECHO IS FORMING</p>
         <h1>回声正在成形</h1>
         <p>{state.stageLabel}</p>
-        <div className="progress-track">
-          <i style={{ width: `${state.progress}%` }} />
-        </div>
-        <strong>{state.progress}%</strong>
+        {identityCandidates.length > 0 ? (
+          <div className="identity-panel" aria-label="参与者身份确认">
+            <h2>哪一位是“我”？</h2>
+            <p>请确认说话人名称，并选择你的视角。memEcho 不会使用声纹推断身份。</p>
+            {identityCandidates.map((candidate) => (
+              <label key={candidate.participant_id}>
+                <input
+                  type="radio"
+                  name="self-participant"
+                  checked={selfParticipantId === candidate.participant_id}
+                  onChange={() => setSelfParticipantId(candidate.participant_id)}
+                />
+                <input
+                  aria-label={`${candidate.display_name} 的名称`}
+                  value={participantNames[candidate.participant_id] ?? ""}
+                  maxLength={80}
+                  onChange={(event) =>
+                    setParticipantNames((current) => ({
+                      ...current,
+                      [candidate.participant_id]: event.target.value,
+                    }))
+                  }
+                />
+                <small>
+                  {Math.round(candidate.speaking_time_ms / 100) / 10} 秒 · {candidate.segment_count} 段
+                </small>
+              </label>
+            ))}
+            <button
+              className="primary-action"
+              onClick={confirmIdentity}
+              disabled={!selfParticipantId || workflowBusy}
+            >
+              {workflowBusy ? "正在继续分析…" : "确认身份并继续"}
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="progress-track">
+              <i style={{ width: `${state.progress}%` }} />
+            </div>
+            <strong>{state.progress}%</strong>
+          </>
+        )}
+        {error && <p className="workflow-error">{error}</p>}
+        {canRetry && (
+          <button className="retry-action" onClick={retryWorkflow} disabled={workflowBusy}>
+            <RotateCcw size={15} /> {workflowBusy ? "正在重试…" : "重试当前步骤"}
+          </button>
+        )}
       </section>
     );
   }

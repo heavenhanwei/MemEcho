@@ -6,6 +6,7 @@ import type {
 } from "@memecho/contracts";
 
 const baseUrl = import.meta.env.VITE_GATEWAY_URL ?? "http://127.0.0.1:8787";
+export const gatewayBaseUrl = baseUrl;
 const token = import.meta.env.VITE_GATEWAY_TOKEN ?? "change-me";
 const ERROR_DETAIL_LIMIT = 320;
 
