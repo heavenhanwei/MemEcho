@@ -1,3 +1,4 @@
+import type { AnalysisResult } from "@memecho/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GatewayApiError, gateway, type GatewayJob } from "./api";
 
@@ -127,5 +128,35 @@ describe("gateway jobEvents", () => {
 
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(fetchMock.mock.calls[0][1]?.signal).toBe(controller.signal);
+  });
+});
+describe("gateway chat evidence context", () => {
+  it("sends only the selected evidence IDs and streams the reply", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('data: {"delta":"回"}\n\ndata: {"delta":"声"}\n\n'),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const deltas: string[] = [];
+
+    await gateway.chat(
+      "这里为什么是分歧？",
+      {} as AnalysisResult,
+      (delta) => deltas.push(delta),
+      ["ev_2", "ev_4"],
+    );
+
+    expect(deltas).toEqual(["回", "声"]);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      evidence_ids: ["ev_2", "ev_4"],
+    });
+  });
+
+  it("sends an explicit empty evidence_ids array when nothing is selected", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('data: {"done":true}\n\n'));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await gateway.chat("概括一下", {} as AnalysisResult, vi.fn());
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).evidence_ids).toEqual([]);
   });
 });

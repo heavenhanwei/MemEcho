@@ -241,10 +241,11 @@ export const gateway = {
     question: string,
     result: AnalysisResult,
     onDelta: (value: string) => void,
+    evidenceIds: string[] = [],
   ) => {
     const response = await fetchGateway("/v1/chat/stream", {
       method: "POST",
-      body: JSON.stringify({ question, result, evidence_ids: [] }),
+      body: JSON.stringify({ question, result, evidence_ids: evidenceIds }),
     });
     if (!response.body) {
       throw new GatewayApiError(response.status, "Gateway chat stream is unavailable");
