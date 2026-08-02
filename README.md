@@ -10,6 +10,13 @@ memEcho Windows 桌面路演版。客户端负责双轨录音、本地会话与�
 - `infra`：Docker 与阿里云部署参考
 - `tests/fixtures`：脱敏联调样例
 
+## 交付文档
+
+- [SAE / ALB / OSS 与生产容器部署](docs/deployment.md)
+- [Windows MSI / NSIS 构建](docs/windows-release.md)
+- [路演版发布验收清单](docs/release-checklist.md)
+- [产品端到端验收矩阵](docs/roadshow-acceptance.md)
+
 ## 本地启动
 
 ```powershell

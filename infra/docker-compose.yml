@@ -1,17 +1,48 @@
-version: "3.9"
+name: memecho
 
 services:
   gateway:
+    image: "memecho-gateway:${MEMECHO_IMAGE_TAG:?Set MEMECHO_IMAGE_TAG}"
     build:
       context: ..
       dockerfile: infra/Dockerfile
+      target: runtime
+    init: true
     ports:
-      - "8787:8787"
-    env_file:
-      - ../.env
+      - "${MEMECHO_BIND_ADDRESS:?Set MEMECHO_BIND_ADDRESS}:${MEMECHO_PORT:?Set MEMECHO_PORT}:8787"
+    environment:
+      MEMECHO_PROVIDER: "${MEMECHO_PROVIDER:?Set MEMECHO_PROVIDER}"
+      MEMECHO_DEMO_TOKEN: "${MEMECHO_DEMO_TOKEN:?Generate a strong random token}"
+      MEMECHO_DATA_DIR: /var/lib/memecho
+      MEMECHO_PUBLIC_BASE_URL: "${MEMECHO_PUBLIC_BASE_URL:?Set the public HTTPS gateway URL}"
+      BAILIAN_TEXT_BASE_URL: "${BAILIAN_TEXT_BASE_URL:?Set the Bailian text endpoint}"
+      BAILIAN_TEXT_API_KEY: "${BAILIAN_TEXT_API_KEY:?Set the Bailian text API key}"
+      BAILIAN_TEXT_MODEL: "${BAILIAN_TEXT_MODEL:?Set the Bailian text model}"
+      BAILIAN_AUDIO_BASE_URL: "${BAILIAN_AUDIO_BASE_URL:?Set the Bailian audio endpoint}"
+      BAILIAN_AUDIO_API_KEY: "${BAILIAN_AUDIO_API_KEY:?Set the Bailian audio API key}"
+      BAILIAN_REALTIME_WS_URL: "${BAILIAN_REALTIME_WS_URL:?Set the Bailian realtime WebSocket endpoint}"
+      BAILIAN_REALTIME_MODEL: "${BAILIAN_REALTIME_MODEL:?Set the realtime ASR model}"
+      BAILIAN_DIARIZATION_MODEL: "${BAILIAN_DIARIZATION_MODEL:?Set the diarization model}"
+      BAILIAN_EMOTION_MODEL: "${BAILIAN_EMOTION_MODEL:?Set the audio emotion model}"
+      OSS_ENDPOINT: "${OSS_ENDPOINT:?Set the private OSS endpoint}"
+      OSS_BUCKET: "${OSS_BUCKET:?Set the private OSS bucket}"
+      OSS_ACCESS_KEY_ID: "${OSS_ACCESS_KEY_ID:?Set the OSS access key ID}"
+      OSS_ACCESS_KEY_SECRET: "${OSS_ACCESS_KEY_SECRET:?Set the OSS access key secret}"
+      OSS_PREFIX: "${OSS_PREFIX:?Set the temporary object prefix}"
+      CHUNK_SIZE_BYTES: "${CHUNK_SIZE_BYTES:?Set the upload chunk size}"
+      MAX_SESSION_SECONDS: "${MAX_SESSION_SECONDS:?Set the session duration limit}"
     volumes:
-      - memecho-data:/tmp/memecho
+      - memecho-data:/var/lib/memecho
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
     restart: unless-stopped
+    stop_grace_period: 30s
 
 volumes:
   memecho-data:
