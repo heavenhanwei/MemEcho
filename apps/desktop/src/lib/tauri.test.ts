@@ -196,6 +196,56 @@ describe("bridge import commands", () => {
     );
   });
 });
+describe("bridge evidence playback", () => {
+  it("forwards a bounded local track range and returns path-free WAV data", async () => {
+    const response = {
+      mime_type: "audio/wav",
+      data_base64: "UklGRg==",
+      duration_ms: 1250,
+      start_ms: 500,
+      end_ms: 1750,
+      track: "mic",
+    };
+    const calls = installMock((cmd) =>
+      cmd === "read_evidence_clip" ? response : null,
+    );
+
+    await expect(
+      bridge.readEvidenceClip("session-123", "mic", 500, 1750),
+    ).resolves.toEqual(response);
+    expect(calls[0]).toEqual({
+      cmd: "read_evidence_clip",
+      args: {
+        sessionId: "session-123",
+        track: "mic",
+        startMs: 500,
+        endMs: 1750,
+      },
+    });
+    expect(response).not.toHaveProperty("path");
+  });
+
+  it("supports the canonical system track name", async () => {
+    const calls = installMock(() => ({
+      mime_type: "audio/wav",
+      data_base64: "UklGRg==",
+      duration_ms: 100,
+      start_ms: 0,
+      end_ms: 100,
+      track: "system",
+    }));
+
+    await bridge.readEvidenceClip("session-123", "system", 0, 100);
+    expect(calls[0].args).toMatchObject({ track: "system" });
+  });
+
+  it("rejects evidence playback outside the installed desktop runtime", async () => {
+    clearMocks();
+    await expect(
+      bridge.readEvidenceClip("session-123", "mic", 0, 1000),
+    ).rejects.toMatchObject({ name: "DesktopRuntimeRequiredError" });
+  });
+});
 describe("bridge desktop persistence commands", () => {
   it("forwards upload arguments and preserves snake_case response fields", async () => {
     const response = {

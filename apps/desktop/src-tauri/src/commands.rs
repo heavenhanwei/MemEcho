@@ -387,6 +387,24 @@ pub fn get_analysis_results(
         .map_err(|e| e.to_string())
 }
 
+/// Read a bounded PCM WAV evidence clip without exposing its local path.
+#[tauri::command]
+pub fn read_evidence_clip(
+    session_id: String,
+    track: String,
+    start_ms: u64,
+    end_ms: u64,
+    state: State<'_, AppState>,
+) -> Result<crate::evidence::EvidenceClip, String> {
+    crate::evidence::read_evidence_clip_impl(
+        &session_id,
+        &track,
+        start_ms,
+        end_ms,
+        &state.sessions_dir,
+    )
+    .map_err(|error| error.to_string())
+}
 /// Copy an imported MP3/WAV/M4A/MP4 into a new private local session.
 #[tauri::command]
 pub fn import_media_file(

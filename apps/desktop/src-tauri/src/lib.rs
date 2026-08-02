@@ -2,6 +2,7 @@ mod audio;
 mod commands;
 pub mod credential;
 pub mod db;
+pub mod evidence;
 pub mod importer;
 mod paths;
 mod recovery;
@@ -52,6 +53,7 @@ pub fn run() {
             commands::get_local_session,
             commands::save_analysis_results,
             commands::get_analysis_results,
+            commands::read_evidence_clip,
             commands::import_media_file,
             commands::import_text_content,
             commands::upload_session_tracks,

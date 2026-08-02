@@ -68,6 +68,20 @@ export interface SavedReportFiles {
   markdown_path: string;
   html_path: string;
 }
+
+/** The only local capture tracks eligible for bounded evidence playback. */
+export type EvidenceTrack = "mic" | "system";
+
+/** A playable WAV clip returned without exposing a local filesystem path. */
+export interface EvidenceClip {
+  mime_type: "audio/wav";
+  data_base64: string;
+  duration_ms: number;
+  start_ms: number;
+  end_ms: number;
+  track: EvidenceTrack;
+}
+
 export interface LocalSession {
   id: string;
   title: string | null;
@@ -174,6 +188,21 @@ export const bridge = {
       sourceName: sourceName ?? null,
     });
   },
+  readEvidenceClip: async (
+    sessionId: string,
+    track: EvidenceTrack,
+    startMs: number,
+    endMs: number,
+  ): Promise<EvidenceClip> => {
+    requireDesktopRuntime("Evidence playback");
+    return invoke<EvidenceClip>("read_evidence_clip", {
+      sessionId,
+      track,
+      startMs,
+      endMs,
+    });
+  },
+
   uploadSessionTracks: async (
     localSessionId: string,
     gatewaySessionId: string,
