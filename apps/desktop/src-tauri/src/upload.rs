@@ -9,7 +9,9 @@ use thiserror::Error;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_RETRIES: u32 = 3;
-const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
+const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB default
+const MAX_CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8 MiB hard cap for server-provided chunk_size
+const MAX_GATEWAY_ERROR_BODY: usize = 512;
 
 #[derive(Debug, Error)]
 pub enum UploadError {
@@ -107,6 +109,16 @@ fn validate_gateway_url(url_str: &str) -> Result<url::Url, UploadError> {
     }
 }
 
+/// Truncate and sanitize a gateway error body to avoid leaking huge or sensitive content.
+fn sanitize_error_body(body: &str) -> String {
+    let truncated: String = body.chars().take(MAX_GATEWAY_ERROR_BODY).collect();
+    if truncated.len() < body.len() {
+        format!("{}…(truncated)", truncated)
+    } else {
+        truncated
+    }
+}
+
 /// Compute SHA-256 of a file by streaming it in chunks.
 pub fn compute_sha256_streaming(path: &Path) -> Result<(String, u64), UploadError> {
     let mut file = std::fs::File::open(path)?;
@@ -136,8 +148,12 @@ async fn upload_track(
     let (sha256, file_size) = compute_sha256_streaming(file_path)?;
 
     // Create upload
+    let file_name = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let create_url = format!(
-        "{}/api/v1/sessions/{}/uploads",
+        "{}/v1/sessions/{}/uploads",
         base_url.as_str().trim_end_matches('/'),
         gateway_session_id
     );
@@ -147,6 +163,8 @@ async fn upload_track(
         .bearer_auth(token)
         .json(&serde_json::json!({
             "track": track_name,
+            "file_name": file_name,
+            "mime_type": "audio/wav",
             "size": file_size,
             "sha256": sha256,
         }))
@@ -156,13 +174,18 @@ async fn upload_track(
     if !create_resp.status().is_success() {
         let status = create_resp.status().as_u16();
         let body = create_resp.text().await.unwrap_or_default();
-        return Err(UploadError::GatewayError { status, body });
+        return Err(UploadError::GatewayError {
+            status,
+            body: sanitize_error_body(&body),
+        });
     }
 
     let create_data: CreateUploadResponse = create_resp.json().await?;
     let upload_id = create_data.upload_id;
-    let chunk_size = if create_data.chunk_size > 0 {
+    let chunk_size = if create_data.chunk_size > 0 && create_data.chunk_size <= MAX_CHUNK_SIZE {
         create_data.chunk_size
+    } else if create_data.chunk_size > MAX_CHUNK_SIZE {
+        MAX_CHUNK_SIZE
     } else {
         CHUNK_SIZE
     };
@@ -179,7 +202,7 @@ async fn upload_track(
         }
 
         let chunk_url = format!(
-            "{}/api/v1/sessions/{}/uploads/{}/chunks/{}",
+            "{}/v1/sessions/{}/uploads/{}/chunks/{}",
             base_url.as_str().trim_end_matches('/'),
             gateway_session_id,
             upload_id,
@@ -225,18 +248,29 @@ async fn upload_track(
 
     // Complete upload
     let complete_url = format!(
-        "{}/api/v1/sessions/{}/uploads/{}/complete",
+        "{}/v1/sessions/{}/uploads/{}/complete",
         base_url.as_str().trim_end_matches('/'),
         gateway_session_id,
         upload_id
     );
 
-    let complete_resp = client.post(&complete_url).bearer_auth(token).send().await?;
+    let complete_resp = client
+        .post(&complete_url)
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "upload_id": upload_id,
+            "sha256": sha256,
+        }))
+        .send()
+        .await?;
 
     if !complete_resp.status().is_success() {
         let status = complete_resp.status().as_u16();
         let body = complete_resp.text().await.unwrap_or_default();
-        return Err(UploadError::GatewayError { status, body });
+        return Err(UploadError::GatewayError {
+            status,
+            body: sanitize_error_body(&body),
+        });
     }
 
     let complete_data: CompleteUploadResponse = complete_resp.json().await?;
@@ -403,5 +437,26 @@ mod tests {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_sanitize_error_body_short() {
+        let body = "not found";
+        assert_eq!(sanitize_error_body(body), "not found");
+    }
+
+    #[test]
+    fn test_sanitize_error_body_truncates_large() {
+        let body = "x".repeat(1000);
+        let sanitized = sanitize_error_body(&body);
+        assert!(sanitized.len() < 600);
+        assert!(sanitized.ends_with("…(truncated)"));
+    }
+
+    #[test]
+    fn test_chunk_size_capped_to_max() {
+        // Verify constants are consistent
+        assert_eq!(MAX_CHUNK_SIZE, 8 * 1024 * 1024);
+        assert!(CHUNK_SIZE <= MAX_CHUNK_SIZE);
     }
 }

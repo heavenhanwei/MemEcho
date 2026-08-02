@@ -273,11 +273,15 @@ mod integration_tests {
             "<h1>Report</h1><p>Content here</p>"
         );
 
-        // Verify no .tmp files remain
+        // Verify no .tmp or .bak files remain
         let session_dir = sessions_dir.join(&session_id);
         for entry in std::fs::read_dir(&session_dir).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
-            assert!(!name.ends_with(".tmp"), "tmp file found: {}", name);
+            assert!(
+                !name.ends_with(".tmp") && !name.ends_with(".bak"),
+                "artifact found: {}",
+                name
+            );
         }
 
         // Verify DB was updated
@@ -311,11 +315,15 @@ mod integration_tests {
         // Should succeed since session dir exists
         assert!(result.is_ok());
 
-        // Verify no stale .tmp files
+        // Verify no stale .tmp or .bak files
         let session_dir = sessions_dir.join(&session_id);
         for entry in std::fs::read_dir(&session_dir).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
-            assert!(!name.ends_with(".tmp"), "stale tmp file: {}", name);
+            assert!(
+                !name.ends_with(".tmp") && !name.ends_with(".bak"),
+                "stale artifact: {}",
+                name
+            );
         }
 
         std::fs::remove_dir_all(&sessions_dir).ok();
@@ -384,7 +392,7 @@ mod integration_tests {
 
         // Mock create-upload (POST to /uploads but NOT /uploads/.../complete)
         Mock::given(method("POST"))
-            .and(path_regex(r"/api/v1/sessions/gw-sess/uploads$"))
+            .and(path_regex(r"/v1/sessions/gw-sess/uploads$"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "upload_id": format!("upload-{}", unique_id()),
                 "chunk_size": 4194304
@@ -395,7 +403,7 @@ mod integration_tests {
         // Mock chunk upload (PUT)
         Mock::given(method("PUT"))
             .and(path_regex(
-                r"/api/v1/sessions/gw-sess/uploads/upload-.*/chunks/\d+",
+                r"/v1/sessions/gw-sess/uploads/upload-.*/chunks/\d+",
             ))
             .respond_with(ResponseTemplate::new(200))
             .mount(&mock_server)
@@ -404,7 +412,7 @@ mod integration_tests {
         // Mock complete upload (POST to /complete)
         Mock::given(method("POST"))
             .and(path_regex(
-                r"/api/v1/sessions/gw-sess/uploads/upload-.*/complete",
+                r"/v1/sessions/gw-sess/uploads/upload-.*/complete",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "upload_id": format!("upload-{}", unique_id()),
@@ -460,7 +468,7 @@ mod integration_tests {
 
         // Mock create-upload succeeds
         Mock::given(method("POST"))
-            .and(path_regex(r"/api/v1/sessions/gw-retry/uploads$"))
+            .and(path_regex(r"/v1/sessions/gw-retry/uploads$"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "upload_id": format!("upload-{}", unique_id()),
                 "chunk_size": 4194304
@@ -471,7 +479,7 @@ mod integration_tests {
         // Mock chunk upload always fails (testing retry exhaustion)
         Mock::given(method("PUT"))
             .and(path_regex(
-                r"/api/v1/sessions/gw-retry/uploads/upload-.*/chunks/\d+",
+                r"/v1/sessions/gw-retry/uploads/upload-.*/chunks/\d+",
             ))
             .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
             .mount(&mock_server)
@@ -573,5 +581,144 @@ mod integration_tests {
         assert_eq!(computed, expected);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Repeat-save and failure-preservation tests ─────────────────────────
+
+    #[test]
+    fn test_report_save_twice_replaces_without_error() {
+        let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let db = setup_db(&sessions_dir);
+        let session_id = format!("repeat-{}", unique_id());
+
+        db.create_session(&session_id, Some("Repeat"), None, None, 16000, None)
+            .unwrap();
+        make_test_session(&sessions_dir, &session_id);
+
+        // First save
+        let r1 = memecho_desktop_lib::report::save_report_files_impl(
+            &session_id,
+            r#"{"version":1}"#,
+            "# Report v1",
+            "<h1>v1</h1>",
+            &sessions_dir,
+            &db,
+        );
+        assert!(r1.is_ok());
+        let saved1 = r1.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&saved1.json_path).unwrap(),
+            r#"{"version":1}"#
+        );
+
+        // Second save — must replace without rename failures
+        let r2 = memecho_desktop_lib::report::save_report_files_impl(
+            &session_id,
+            r#"{"version":2}"#,
+            "# Report v2",
+            "<h1>v2</h1>",
+            &sessions_dir,
+            &db,
+        );
+        assert!(r2.is_ok());
+        let saved2 = r2.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&saved2.json_path).unwrap(),
+            r#"{"version":2}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(&saved2.markdown_path).unwrap(),
+            "# Report v2"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&saved2.html_path).unwrap(),
+            "<h1>v2</h1>"
+        );
+
+        // No temp or backup artifacts remain
+        let session_dir = sessions_dir.join(&session_id);
+        for entry in std::fs::read_dir(&session_dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            assert!(
+                !name.ends_with(".tmp") && !name.ends_with(".bak"),
+                "artifact found: {}",
+                name
+            );
+        }
+
+        std::fs::remove_dir_all(&sessions_dir).ok();
+    }
+
+    #[test]
+    fn test_report_failure_preserves_old_report() {
+        let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let db = setup_db(&sessions_dir);
+        let session_id = format!("preserve-{}", unique_id());
+
+        db.create_session(&session_id, Some("Preserve"), None, None, 16000, None)
+            .unwrap();
+        make_test_session(&sessions_dir, &session_id);
+
+        // Save a valid report first
+        let r1 = memecho_desktop_lib::report::save_report_files_impl(
+            &session_id,
+            r#"{"original":true}"#,
+            "# Original",
+            "<h1>Original</h1>",
+            &sessions_dir,
+            &db,
+        );
+        assert!(r1.is_ok());
+
+        // Now attempt a save with invalid JSON — should fail
+        let r2 = memecho_desktop_lib::report::save_report_files_impl(
+            &session_id,
+            "not valid json at all",
+            "# New",
+            "<h1>New</h1>",
+            &sessions_dir,
+            &db,
+        );
+        assert!(r2.is_err());
+
+        // The original report files must still be intact
+        let session_dir = sessions_dir.join(&session_id);
+        let json_path = session_dir.join("report.json");
+        let md_path = session_dir.join("report.md");
+        let html_path = session_dir.join("report.html");
+
+        assert!(
+            json_path.exists(),
+            "original report.json should still exist"
+        );
+        assert!(md_path.exists(), "original report.md should still exist");
+        assert!(
+            html_path.exists(),
+            "original report.html should still exist"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&json_path).unwrap(),
+            r#"{"original":true}"#
+        );
+        assert_eq!(std::fs::read_to_string(&md_path).unwrap(), "# Original");
+        assert_eq!(
+            std::fs::read_to_string(&html_path).unwrap(),
+            "<h1>Original</h1>"
+        );
+
+        // No stale artifacts
+        for entry in std::fs::read_dir(&session_dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            assert!(
+                !name.ends_with(".tmp") && !name.ends_with(".bak"),
+                "artifact found: {}",
+                name
+            );
+        }
+
+        std::fs::remove_dir_all(&sessions_dir).ok();
     }
 }

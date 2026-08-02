@@ -40,18 +40,66 @@ fn validate_json(json_str: &str) -> Result<(), ReportError> {
     Ok(())
 }
 
-/// Atomically write a file: write to .tmp then rename.
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ReportError> {
-    let tmp_path = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().unwrap_or_default().to_string_lossy()
-    ));
+/// Write contents to a temp file in the same directory as `path`.
+/// Returns the temp path on success so the caller can manage it.
+fn write_to_tmp(path: &Path, contents: &[u8]) -> Result<PathBuf, ReportError> {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp_path = path.with_extension(format!("{}.tmp", ext));
     std::fs::write(&tmp_path, contents)?;
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    Ok(tmp_path)
+}
+
+/// Windows-safe file replacement: back up the existing file (if any),
+/// then rename the new file into place.  Returns the backup path if
+/// one was created so the caller can restore on failure.
+fn replace_with_backup(new_path: &Path, final_path: &Path) -> Result<Option<PathBuf>, ReportError> {
+    let bak_path = final_path.with_extension(format!(
+        "{}.bak",
+        final_path
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let had_existing = final_path.exists();
+    if had_existing {
+        std::fs::rename(final_path, &bak_path)?;
+    }
+    if let Err(e) = std::fs::rename(new_path, final_path) {
+        // Restore backup before returning error
+        if had_existing {
+            let _ = std::fs::rename(&bak_path, final_path);
+        }
+        return Err(e.into());
+    }
+    Ok(if had_existing { Some(bak_path) } else { None })
+}
+
+/// Restore a file from its .bak backup, deleting the (possibly partial) new version.
+fn restore_from_backup(final_path: &Path, bak_path: &Path) {
+    // Remove the partial new file; ignore errors (may not exist)
+    let _ = std::fs::remove_file(final_path);
+    let _ = std::fs::rename(bak_path, final_path);
+}
+
+/// Clean up .tmp and .bak artifacts that may have been left behind.
+fn cleanup_artifacts(base_path: &Path) {
+    let ext = base_path
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let _ = std::fs::remove_file(base_path.with_extension(format!("{}.tmp", ext)));
+    let _ = std::fs::remove_file(base_path.with_extension(format!("{}.bak", ext)));
 }
 
 /// Save report files for a session.
+///
+/// Uses same-directory temp files and a backup/rollback strategy so that:
+/// - Saving a second time replaces the prior artifacts without rename failures.
+/// - If a later step fails, the previous valid report is restored from backups.
+/// - No temp/backup files are left after success.
 pub fn save_report_files_impl(
     local_session_id: &str,
     analysis_json: &str,
@@ -107,37 +155,79 @@ pub fn save_report_files_impl(
     let markdown_path = session_dir.join("report.md");
     let html_path = session_dir.join("report.html");
 
-    // Atomic writes: if any fails, clean up previously written files
-    let mut written: Vec<&Path> = Vec::new();
+    // Write all three to temp files first (atomic: no final paths touched yet)
+    let json_tmp = write_to_tmp(&json_path, analysis_json.as_bytes()).map_err(|e| {
+        cleanup_artifacts(&json_path);
+        e
+    })?;
+    let md_tmp = write_to_tmp(&markdown_path, markdown.as_bytes()).map_err(|e| {
+        cleanup_artifacts(&json_path);
+        cleanup_artifacts(&markdown_path);
+        e
+    })?;
+    let html_tmp = write_to_tmp(&html_path, html.as_bytes()).map_err(|e| {
+        cleanup_artifacts(&json_path);
+        cleanup_artifacts(&markdown_path);
+        cleanup_artifacts(&html_path);
+        e
+    })?;
 
-    match atomic_write(&json_path, analysis_json.as_bytes()) {
-        Ok(()) => written.push(&json_path),
+    // Replace each final path, collecting backups for rollback on failure
+    let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new(); // (final, bak)
+
+    match replace_with_backup(&json_tmp, &json_path) {
+        Ok(bak) => {
+            if let Some(b) = bak {
+                backups.push((json_path.clone(), b));
+            }
+        }
         Err(e) => {
-            cleanup_tmp(&json_path);
+            cleanup_artifacts(&json_path);
+            cleanup_artifacts(&markdown_path);
+            cleanup_artifacts(&html_path);
             return Err(e);
         }
     }
 
-    match atomic_write(&markdown_path, markdown.as_bytes()) {
-        Ok(()) => written.push(&markdown_path),
-        Err(e) => {
-            cleanup_tmp(&markdown_path);
-            for p in written {
-                std::fs::remove_file(p).ok();
+    match replace_with_backup(&md_tmp, &markdown_path) {
+        Ok(bak) => {
+            if let Some(b) = bak {
+                backups.push((markdown_path.clone(), b));
             }
+        }
+        Err(e) => {
+            // Rollback: restore json_path from its backup
+            for (final_p, bak_p) in backups.iter().rev() {
+                restore_from_backup(final_p, bak_p);
+            }
+            cleanup_artifacts(&json_path);
+            cleanup_artifacts(&markdown_path);
+            cleanup_artifacts(&html_path);
             return Err(e);
         }
     }
 
-    match atomic_write(&html_path, html.as_bytes()) {
-        Ok(()) => {}
-        Err(e) => {
-            cleanup_tmp(&html_path);
-            for p in written {
-                std::fs::remove_file(p).ok();
+    match replace_with_backup(&html_tmp, &html_path) {
+        Ok(bak) => {
+            if let Some(b) = bak {
+                backups.push((html_path.clone(), b));
             }
+        }
+        Err(e) => {
+            // Rollback: restore all previous backups
+            for (final_p, bak_p) in backups.iter().rev() {
+                restore_from_backup(final_p, bak_p);
+            }
+            cleanup_artifacts(&json_path);
+            cleanup_artifacts(&markdown_path);
+            cleanup_artifacts(&html_path);
             return Err(e);
         }
+    }
+
+    // All three written successfully — clean up backups
+    for (final_p, _) in &backups {
+        cleanup_artifacts(final_p);
     }
 
     // Update SQLite with the analysis JSON
@@ -159,15 +249,6 @@ pub fn save_report_files_impl(
     })
 }
 
-/// Clean up .tmp files that may have been left behind.
-fn cleanup_tmp(path: &Path) {
-    let tmp_path = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().unwrap_or_default().to_string_lossy()
-    ));
-    std::fs::remove_file(tmp_path).ok();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,14 +267,37 @@ mod tests {
     }
 
     #[test]
-    fn test_atomic_write_creates_file() {
+    fn test_write_to_tmp_creates_file() {
         let dir = std::env::temp_dir().join("memecho_report_test_atomic");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.txt");
-        atomic_write(&path, b"hello").unwrap();
+        let tmp = write_to_tmp(&path, b"hello").unwrap();
+        assert!(tmp.exists());
+        assert_eq!(std::fs::read_to_string(&tmp).unwrap(), "hello");
+        // Final path not yet created
+        assert!(!path.exists());
+        // Replace into place
+        let bak = replace_with_backup(&tmp, &path).unwrap();
         assert!(path.exists());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
         assert!(!dir.join("test.txt.tmp").exists());
+        assert!(bak.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_replace_overwrites_existing() {
+        let dir = std::env::temp_dir().join("memecho_report_test_replace");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data.txt");
+        std::fs::write(&path, b"old").unwrap();
+        let tmp = write_to_tmp(&path, b"new").unwrap();
+        let bak = replace_with_backup(&tmp, &path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert!(bak.is_some());
+        // Clean up backup
+        cleanup_artifacts(&path);
+        assert!(!dir.join("data.txt.bak").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 
