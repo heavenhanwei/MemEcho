@@ -111,6 +111,7 @@ main { min-width: 0; overflow: hidden; }
 }
 .device-selects select:disabled { cursor: not-allowed; color: var(--muted); }
 .backend-note { margin: 16px 0 0; color: var(--muted); font-size: 10px; letter-spacing: .08em; }
+.live-scope-note { margin: 8px 0 0; color: #6b5bd3; font-size: 10px; line-height: 1.55; }
 .meter-note { color: #a5644e; font-size: 10px; margin: 4px 0; }
 .soul-column { min-height: 535px; position: relative; display: grid; place-items: center; }
 .sphere-stage { width: min(520px, 42vw); aspect-ratio: 1; position: relative; }
@@ -152,6 +153,10 @@ main { min-width: 0; overflow: hidden; }
 .live-pill { color: var(--violet); font-size: 10px; letter-spacing: .12em; margin: 0; }
 .live-pill i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #d36d6d; margin-right: 5px; }
 .live-caption { min-height: 22px; color: var(--muted); font-size: 12px; }
+.live-connection { margin: -8px 0 9px; color: var(--muted); font-size: 10px; }
+.live-connection.connected { color: #3f7b68; }
+.live-connection.reconnecting { color: #9b6a2e; }
+.live-connection.offline { color: #a64c4c; }
 .recording-panel > div { display: flex; justify-content: center; gap: 8px; }
 .recording-panel button {
   border: 1px solid var(--line); background: white; border-radius: 999px; padding: 10px 15px;

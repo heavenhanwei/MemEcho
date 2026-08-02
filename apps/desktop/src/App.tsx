@@ -23,6 +23,7 @@ import {
   type GatewayJob,
   type ParticipantCandidate,
 } from "./lib/api";
+import { startLivePcmCapture, type LivePcmCapture } from "./lib/livePcm";
 import {
   bridge,
   isTauriRuntime,
@@ -60,6 +61,16 @@ type WorkflowContext = {
   identityResolved: boolean;
 };
 
+
+type LiveStatus = "connecting" | "connected" | "reconnecting" | "offline";
+
+const liveStatusLabel: Record<LiveStatus, string> = {
+  connecting: "\u4e34\u65f6\u5b57\u5e55\u8fde\u63a5\u4e2d",
+  connected: "\u4e34\u65f6\u5b57\u5e55\u5df2\u8fde\u63a5",
+  reconnecting: "\u4e34\u65f6\u5b57\u5e55\u6b63\u5728\u91cd\u8fde\uff0c\u672c\u5730\u5f55\u97f3\u7ee7\u7eed",
+  offline: "\u4e34\u65f6\u5b57\u5e55\u79bb\u7ebf\uff0c\u672c\u5730\u5f55\u97f3\u7ee7\u7eed",
+};
+
 function isAbortError(cause: unknown) {
   return cause instanceof DOMException && cause.name === "AbortError";
 }
@@ -72,6 +83,12 @@ function NowPage() {
   const stream = useRef<MediaStream | null>(null);
   const socket = useRef<WebSocket | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
+  const liveCapture = useRef<LivePcmCapture | null>(null);
+  const recordingActive = useRef(false);
+  const liveSessionId = useRef<string | null>(null);
+  const liveRetryTimer = useRef<number | undefined>(undefined);
+  const liveFinishTimer = useRef<number | undefined>(undefined);
+  const liveRetryAttempt = useRef(0);
   const backend = useRef<"tauri" | "web">("web");
   const localSessionId = useRef<string | null>(null);
   const workflow = useRef<WorkflowContext | null>(null);
@@ -87,6 +104,7 @@ function NowPage() {
   const [selfParticipantId, setSelfParticipantId] = useState("");
   const [workflowBusy, setWorkflowBusy] = useState(false);
   const [canRetry, setCanRetry] = useState(false);
+  const [liveStatus, setLiveStatus] = useState<LiveStatus>("offline");
 
   useEffect(() => {
     if (!isTauri) return;
@@ -106,8 +124,11 @@ function NowPage() {
 
   useEffect(
     () => () => {
+      recordingActive.current = false;
+      if (liveRetryTimer.current) window.clearTimeout(liveRetryTimer.current);
+      if (liveFinishTimer.current) window.clearTimeout(liveFinishTimer.current);
       if (timer.current) window.clearInterval(timer.current);
-      stopMeter();
+      void stopLiveAudio();
       socket.current?.close();
       progressAbort.current?.abort();
     },
@@ -141,6 +162,139 @@ function NowPage() {
     }
   }
 
+
+  function scheduleLiveReconnect() {
+    if (
+      !recordingActive.current ||
+      !liveCapture.current ||
+      !liveSessionId.current ||
+      liveRetryTimer.current
+    ) {
+      return;
+    }
+    setLiveStatus("reconnecting");
+    const delay = Math.min(1000 * 2 ** Math.min(liveRetryAttempt.current, 4), 15_000);
+    liveRetryTimer.current = window.setTimeout(() => {
+      liveRetryTimer.current = undefined;
+      liveRetryAttempt.current += 1;
+      if (liveSessionId.current) connectLive(liveSessionId.current);
+    }, delay);
+  }
+
+  function connectLive(sessionId: string) {
+    if (!recordingActive.current || !liveCapture.current) return;
+    setLiveStatus(liveRetryAttempt.current > 0 ? "reconnecting" : "connecting");
+    let allowReconnect = true;
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(gateway.liveUrl(sessionId));
+    } catch {
+      setLiveStatus("offline");
+      scheduleLiveReconnect();
+      return;
+    }
+    socket.current = ws;
+
+    ws.onopen = () => {
+      if (socket.current !== ws) return;
+      liveRetryAttempt.current = 0;
+      setLiveStatus("connected");
+    };
+    ws.onmessage = (message) => {
+      if (socket.current !== ws) return;
+      let event: {
+        type?: string;
+        state?: string;
+        text?: string;
+        retryable?: boolean;
+      };
+      try {
+        event = JSON.parse(message.data);
+      } catch {
+        return;
+      }
+      if (
+        (event.type === "transcript.partial" || event.type === "transcript.final") &&
+        event.text
+      ) {
+        useAppStore.getState().patch({ caption: event.text });
+      } else if (event.type === "connection.state") {
+        if (event.state === "connected") setLiveStatus("connected");
+        if (event.state === "reconnecting") setLiveStatus("reconnecting");
+        if (event.state === "offline") {
+          setLiveStatus("offline");
+          if (recordingActive.current) scheduleLiveReconnect();
+          ws.close();
+        }
+      } else if (event.type === "error") {
+        allowReconnect = event.retryable !== false;
+        setLiveStatus(allowReconnect ? "reconnecting" : "offline");
+        if (allowReconnect) scheduleLiveReconnect();
+        ws.close();
+      }
+    };
+    ws.onerror = () => {
+      if (socket.current !== ws) return;
+      setLiveStatus("reconnecting");
+      ws.close();
+    };
+    ws.onclose = () => {
+      if (socket.current !== ws) return;
+      socket.current = null;
+      if (recordingActive.current && allowReconnect) scheduleLiveReconnect();
+      else setLiveStatus("offline");
+    };
+  }
+
+  function startLiveAudio(media: MediaStream) {
+    liveCapture.current = startLivePcmCapture(media, {
+      getSocket: () => socket.current,
+      onLevel: (volume) => useAppStore.getState().patch({ volume }),
+      onSendError: () => {
+        setLiveStatus("reconnecting");
+        socket.current?.close();
+      },
+    });
+  }
+
+  async function stopLiveAudio(flush = false) {
+    const capture = liveCapture.current;
+    liveCapture.current = null;
+    try {
+      await capture?.stop(flush);
+    } catch {
+      setLiveStatus("offline");
+    } finally {
+      stream.current?.getTracks().forEach((track) => track.stop());
+      stream.current = null;
+      useAppStore.getState().patch({ volume: 0 });
+    }
+  }
+
+  function finishLiveSocket() {
+    if (liveRetryTimer.current) window.clearTimeout(liveRetryTimer.current);
+    liveRetryTimer.current = undefined;
+    const ws = socket.current;
+    if (!ws) return;
+    if (ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send("end");
+      } catch {
+        socket.current = null;
+        setLiveStatus("offline");
+        ws.close();
+        return;
+      }
+      liveFinishTimer.current = window.setTimeout(() => {
+        if (socket.current === ws) socket.current = null;
+        ws.close();
+      }, 2000);
+    } else {
+      socket.current = null;
+      ws.close();
+    }
+  }
+
   async function start() {
     if (state.soulState !== "idle") return;
     setError("");
@@ -151,14 +305,9 @@ function NowPage() {
     setCanRetry(false);
     try {
       const session = await gateway.createSession("新的回声", source);
-      const ws = new WebSocket(gateway.liveUrl(session.id));
-      socket.current = ws;
-      ws.onmessage = (message) => {
-        const event = JSON.parse(message.data);
-        if (event.type === "transcript.partial" || event.type === "transcript.final") {
-          useAppStore.getState().patch({ caption: event.text });
-        }
-      };
+      liveSessionId.current = session.id;
+      liveRetryAttempt.current = 0;
+      setLiveStatus("connecting");
 
       if (isTauri) {
         backend.current = "tauri";
@@ -172,7 +321,7 @@ function NowPage() {
             audio: { echoCancellation: true, noiseSuppression: true },
           });
           stream.current = media;
-          startMeter(media);
+          startLiveAudio(media);
         } catch {
           setMeterNote("音量计不可用：未授予窗口麦克风访问权限（不影响本地录音）");
         }
@@ -184,7 +333,13 @@ function NowPage() {
         stream.current = media;
         recorder.current = new MediaRecorder(media);
         recorder.current.start(1000);
-        startMeter(media);
+        startLiveAudio(media);
+      }
+      recordingActive.current = true;
+      if (liveCapture.current) {
+        connectLive(session.id);
+      } else {
+        setLiveStatus("offline");
       }
 
       state.patch({
@@ -199,9 +354,12 @@ function NowPage() {
         1000,
       );
     } catch (cause) {
+      recordingActive.current = false;
+      if (liveRetryTimer.current) window.clearTimeout(liveRetryTimer.current);
+      liveRetryTimer.current = undefined;
       socket.current?.close();
       socket.current = null;
-      stopMeter();
+      await stopLiveAudio();
       if (timer.current) window.clearInterval(timer.current);
       timer.current = undefined;
       setError(describeError(cause, "无法开始录音"));
@@ -221,6 +379,7 @@ function NowPage() {
         recorder.current?.pause();
       }
       state.patch({ soulState: paused ? "recording" : "paused" });
+      liveCapture.current?.setPaused(!paused);
     } catch (cause) {
       setError(describeError(cause, "无法切换暂停状态"));
     }
@@ -435,6 +594,7 @@ function NowPage() {
     if (timer.current) window.clearInterval(timer.current);
     timer.current = undefined;
     setError("");
+    recordingActive.current = false;
 
     let stopFailure: unknown = null;
     try {
@@ -449,10 +609,8 @@ function NowPage() {
       stopFailure = cause;
     }
 
-    stopMeter();
-    socket.current?.send("end");
-    socket.current?.close();
-    socket.current = null;
+    await stopLiveAudio(true);
+    finishLiveSocket();
 
     if (stopFailure) {
       setError(describeError(stopFailure, "停止录音时出现问题"));
@@ -617,6 +775,11 @@ function NowPage() {
             </label>
           </div>
         )}
+        {isTauri && source === "mixed" && (
+          <p className="live-scope-note">
+            {"\u5b9e\u65f6\u5b57\u5e55\u4ec5\u4f7f\u7528\u9ea6\u514b\u98ce\uff1b\u6b63\u5f0f\u62a5\u544a\u4ecd\u4f7f\u7528\u672c\u5730\u9ea6\u514b\u98ce\u4e0e\u7cfb\u7edf\u58f0\u97f3\u53cc\u8f68\u3002"}
+          </p>
+        )}
         <p className="backend-note">
           {isTauri
             ? "桌面原生录音 · 麦克风＋系统输出双轨（WASAPI）"
@@ -636,6 +799,7 @@ function NowPage() {
             </p>
             <strong>{formatTime(state.elapsed)}</strong>
             <p className="live-caption">{state.caption}</p>
+            <p className={`live-connection ${liveStatus}`}>{liveStatusLabel[liveStatus]}</p>
             {meterNote && <p className="meter-note">{meterNote}</p>}
             <div>
               <button onClick={togglePause}>

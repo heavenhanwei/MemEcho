@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { gateway } from "./lib/api";
@@ -27,8 +27,9 @@ vi.mock("./lib/api", () => ({
 }));
 
 class FakeMediaStream {
+  stop = vi.fn();
   getTracks() {
-    return [] as Array<{ stop: () => void }>;
+    return [{ stop: this.stop }];
   }
 }
 
@@ -44,28 +45,64 @@ class FakeMediaRecorder {
 }
 
 class FakeWebSocket {
+  static OPEN = 1;
   static instances: FakeWebSocket[] = [];
+  readyState = 0;
+  onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
-  sent: string[] = [];
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  sent: Array<string | ArrayBuffer> = [];
   constructor(public url: string) {
     FakeWebSocket.instances.push(this);
   }
-  send(data: string) {
+  open() {
+    this.readyState = FakeWebSocket.OPEN;
+    this.onopen?.();
+  }
+  serverMessage(event: object) {
+    this.onmessage?.({ data: JSON.stringify(event) });
+  }
+  send(data: string | ArrayBuffer) {
     this.sent.push(data);
   }
-  close() {}
+  close() {
+    if (this.readyState === 3) return;
+    this.readyState = 3;
+    this.onclose?.();
+  }
+}
+
+class FakeAudioProcessor {
+  static instances: FakeAudioProcessor[] = [];
+  onaudioprocess: ((event: AudioProcessingEvent) => void) | null = null;
+  connect = vi.fn();
+  disconnect = vi.fn();
+  constructor() {
+    FakeAudioProcessor.instances.push(this);
+  }
+  emit(samples: Float32Array) {
+    this.onaudioprocess?.({
+      inputBuffer: {
+        numberOfChannels: 1,
+        length: samples.length,
+        getChannelData: () => samples,
+      } as unknown as AudioBuffer,
+    } as AudioProcessingEvent);
+  }
 }
 
 class FakeAudioContext {
-  createAnalyser() {
-    return {
-      fftSize: 0,
-      frequencyBinCount: 2,
-      getByteFrequencyData: (target: Uint8Array) => target.fill(0),
-    };
-  }
+  sampleRate = 48_000;
+  destination = {};
   createMediaStreamSource() {
-    return { connect: () => undefined };
+    return { connect: vi.fn(), disconnect: vi.fn() };
+  }
+  createScriptProcessor() {
+    return new FakeAudioProcessor();
+  }
+  resume() {
+    return Promise.resolve();
   }
   close() {
     return Promise.resolve();
@@ -88,6 +125,7 @@ beforeEach(() => {
     result: null,
   });
   FakeMediaRecorder.instances = [];
+  FakeAudioProcessor.instances = [];
   FakeWebSocket.instances = [];
   vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
   vi.stubGlobal("WebSocket", FakeWebSocket);
@@ -133,7 +171,41 @@ describe("App (web preview)", () => {
   });
 });
 
-describe("App (Tauri desktop)", () => {
+describe("App (live resilience and Tauri desktop)", () => {
+  it("streams PCM and keeps local recording alive when live captions disconnect", async () => {
+    const media = new FakeMediaStream();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(
+      media as unknown as MediaStream,
+    );
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /\u70b9\u51fb\u7403\u4f53/ }));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const ws = FakeWebSocket.instances[0];
+    act(() => ws.open());
+
+    const samples = new Float32Array(480);
+    samples.fill(0.2);
+    act(() => FakeAudioProcessor.instances[0].emit(samples));
+    expect(ws.sent.some((frame) => frame instanceof ArrayBuffer)).toBe(true);
+
+    act(() =>
+      ws.serverMessage({
+        type: "error",
+        code: "upstream_disconnected",
+        message: "retry",
+        retryable: true,
+      }),
+    );
+
+    expect(FakeMediaRecorder.instances[0].stop).not.toHaveBeenCalled();
+    expect(media.stop).not.toHaveBeenCalled();
+    expect(useAppStore.getState().soulState).toBe("recording");
+    expect(
+      screen.getByText(/\u4e34\u65f6\u5b57\u5e55\u6b63\u5728\u91cd\u8fde/),
+    ).toBeInTheDocument();
+  });
+
   it("uses native dual-track capture instead of MediaRecorder", async () => {
     const calls: Array<{ cmd: string; args: unknown }> = [];
     mockIPC((cmd, args) => {
@@ -154,6 +226,9 @@ describe("App (Tauri desktop)", () => {
     render(<App />);
     expect(await screen.findByText(/真实麦克风（默认）/)).toBeInTheDocument();
     expect(screen.getByText("桌面原生录音 · 麦克风＋系统输出双轨（WASAPI）")).toBeInTheDocument();
+    expect(
+      screen.getByText(/\u5b9e\u65f6\u5b57\u5e55\u4ec5\u4f7f\u7528\u9ea6\u514b\u98ce/),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("点击球体，开始录音"));
     await waitFor(() => expect(calls.some((call) => call.cmd === "start_capture")).toBe(true));
