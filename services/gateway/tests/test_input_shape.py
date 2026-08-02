@@ -9,6 +9,7 @@ def test_result_with_rendered_fields_still_valid():
         "request_id": "req_test",
         "analysis_mode": "text_only",
         "scope": {
+            "single_session": True,
             "quality": 0.5,
             "signals_used": ["transcript"],
             "signals_missing": ["acoustic"],

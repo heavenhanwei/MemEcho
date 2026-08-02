@@ -10,6 +10,17 @@ memEcho Windows 桌面路演版。客户端负责双轨录音、本地会话与�
 - `infra`：Docker 与阿里云部署参考
 - `tests/fixtures`：脱敏联调样例
 
+## 分析合同
+
+FastAPI 的 Pydantic 模型是 memEcho 1.1 分析合同的唯一来源。修改模型或 `/analyze`、`/result` 接口后，在已激活网关 Python 3.12 虚拟环境的终端中运行：
+
+```powershell
+python services/gateway/scripts/generate_types.py
+python services/gateway/scripts/generate_types.py --check
+```
+
+生成文件为 `packages/contracts/src/generated.ts`；桌面端通过 `@memecho/contracts` 使用该文件，不应手工维护第二份分析类型。
+
 ## 交付文档
 
 - [SAE / ALB / OSS 与生产容器部署](docs/deployment.md)
@@ -37,4 +48,3 @@ python -m uvicorn memecho_gateway.main:app --reload --port 8787
 ## 演示模式
 
 未配置百炼时，网关默认使用确定性 mock 适配器，仍可完整演示上传、处理、报告、记忆与追问流程。设置 `MEMECHO_PROVIDER=bailian` 后启用真实链路。
-

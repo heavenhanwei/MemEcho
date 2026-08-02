@@ -2,9 +2,21 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import ValidationError
+
+from .models import AnalysisResult
+
 
 def validate_result(data: dict[str, Any]) -> list[str]:
     errors: list[str] = []
+    try:
+        AnalysisResult.model_validate(data)
+    except ValidationError as exc:
+        return [
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors(include_url=False)
+        ]
+
     if data.get("schema_version") != "1.1":
         errors.append("schema_version must be 1.1")
     if data.get("analysis_mode") not in {
@@ -43,4 +55,3 @@ def validate_result(data: dict[str, Any]) -> list[str]:
     if not isinstance(data.get("memory", {}).get("written"), bool):
         errors.append("memory.written must be boolean")
     return errors
-

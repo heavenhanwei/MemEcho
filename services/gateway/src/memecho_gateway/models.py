@@ -4,11 +4,17 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
 
 
 class StrictRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class ContractModel(BaseModel):
+    """Forward-compatible memEcho contract output."""
+
+    model_config = ConfigDict(extra="ignore")
 
 
 class JobStatus(StrEnum):
@@ -82,18 +88,230 @@ class UploadComplete(StrictRequest):
 
 class ParticipantResolution(StrictRequest):
     participants: list[dict[str, Any]]
-    self_participant_id: str | None = None
+    self_participant_id: str | None
     identity_basis: Literal["user_confirmed", "auto_single_speaker", "unknown"]
 
 
-class AnalyzeRequest(StrictRequest):
-    request_id: str
+SourceType = Literal["text", "transcript", "audio", "video"]
+FocusModule = Literal["minutes", "content_analysis", "vad", "self_echo", "coaching"]
+IdentityBasis = Literal["user_confirmed", "auto_single_speaker", "unknown"]
+AnalysisMode = Literal["connected_full", "local_enhanced", "text_only", "insufficient"]
+
+
+class AnalysisSource(StrictRequest):
+    type: SourceType
+    text: str | None = None
+    path: str | None = None
+    mime_type: str | None = None
+
+    @model_validator(mode="after")
+    def has_exactly_one_locator(self) -> "AnalysisSource":
+        if bool(self.text) == bool(self.path):
+            raise ValueError("exactly one of source.text or source.path is required")
+        return self
+
+
+class AnalysisSession(StrictRequest):
+    title: str = Field(min_length=1, max_length=120)
+    occurred_at: datetime | None = None
+    context: str = Field(default="工作", max_length=80)
+
+
+class Participant(ContractModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    is_self: bool = False
+
+
+class CoachingOptions(StrictRequest):
+    enabled: bool = False
+    max_scenes: int = Field(default=1, ge=1, le=10)
+
+
+class AnalysisMark(StrictRequest):
+    at_ms: int = Field(ge=0)
+    label: str = Field(min_length=1, max_length=120)
+
+
+class MemoryOptions(StrictRequest):
+    mode: Literal["off", "ask", "on"] = "off"
+    scope: list[str] = Field(default_factory=list)
+
+
+class AnalysisRequest(StrictRequest):
+    """Portable memEcho 1.1 request with gateway-compatible defaults.
+
+    Desktop recordings carry source/session metadata in the session and upload
+    endpoints, so those portable fields remain optional at this route.
+    """
+
+    request_id: str = Field(min_length=1)
     schema_version: Literal["1.1"] = "1.1"
-    focus: list[str] = Field(
+    source: AnalysisSource | None = None
+    session: AnalysisSession | None = None
+    participants: list[Participant] = Field(default_factory=list)
+    self_identity_basis: IdentityBasis = "unknown"
+    target_participant_ids: list[str] = Field(default_factory=list)
+    language: str = "zh-CN"
+    focus: list[FocusModule] = Field(
         default_factory=lambda: ["minutes", "content_analysis", "vad", "self_echo"]
     )
-    memory_mode: Literal["off", "ask", "on"] = "off"
-    language: str = "zh-CN"
+    coaching: CoachingOptions = Field(default_factory=CoachingOptions)
+    marks: list[AnalysisMark] = Field(default_factory=list)
+    memory: MemoryOptions = Field(default_factory=MemoryOptions)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_memory_mode(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "memory_mode" in value:
+            migrated = dict(value)
+            legacy_mode = migrated.pop("memory_mode")
+            migrated.setdefault("memory", {"mode": legacy_mode, "scope": []})
+            return migrated
+        return value
+
+
+# Backwards-compatible import used by earlier gateway code and tests.
+AnalyzeRequest = AnalysisRequest
+
+
+class AnalysisScope(ContractModel):
+    single_session: Literal[True]
+    signals_used: list[str]
+    signals_missing: list[str]
+    quality: float = Field(ge=0, le=1)
+    target_participant_ids: list[str]
+    self_participant_id: str | None
+    self_identity_basis: IdentityBasis
+
+
+class ActionItem(ContractModel):
+    text: str = Field(min_length=1)
+    owner: str | None
+    due_at: datetime | None
+    origin: Literal["discussed", "suggested"]
+    status: Literal["confirmed", "proposed"]
+    evidence_refs: list[str]
+
+
+class Minutes(ContractModel):
+    summary: str
+    focus: list[str]
+    consensus: list[str]
+    disagreements: list[str]
+    explicit_actions: list[ActionItem]
+    recommendations: list[ActionItem]
+
+
+class ParticipantContentAnalysis(ContractModel):
+    participant_id: str
+    fact_claims: list[str]
+    opinions: list[str]
+    attitudes: list[str]
+    influence_summary: list[str]
+
+
+class VadPoint(ContractModel):
+    participant_id: str
+    segment_id: str
+    v: float = Field(ge=-1, le=1)
+    a: float = Field(ge=-1, le=1)
+    d: float = Field(ge=-1, le=1)
+    scale: Literal["-1..1"]
+    confidence: float = Field(ge=0, le=1)
+    linguistic_weight: float = Field(ge=0, le=1)
+    acoustic_weight: float = Field(ge=0, le=1)
+    evidence_refs: list[str]
+
+
+class FlexibleContractObject(RootModel[dict[str, Any]]):
+    pass
+
+
+class SelfEchoEffect(ContractModel):
+    wording: str
+    observed_followup: str
+    confidence: float = Field(ge=0, le=1)
+    evidence_refs: list[str]
+
+
+class SelfEchoAlternative(ContractModel):
+    source: str
+    rewrite: str
+
+
+class SelfEcho(ContractModel):
+    participant_id: str | None
+    identity_basis: IdentityBasis
+    effects: list[SelfEchoEffect | FlexibleContractObject]
+    alternatives: list[SelfEchoAlternative | FlexibleContractObject]
+
+
+class CoachingResult(ContractModel):
+    enabled: bool
+    status: Literal["not_requested", "awaiting_user", "scored", "complete"]
+    scenes: list[FlexibleContractObject]
+
+
+class Insight(ContractModel):
+    id: str
+    claim: str
+    claim_level: Literal["observed", "computed", "interpreted"]
+    confidence: float = Field(ge=0, le=1)
+    evidence_refs: list[str]
+    alternatives: list[str]
+
+
+class Evidence(ContractModel):
+    id: str
+    source_type: Literal["transcript", "acoustic", "user_mark"]
+    speaker_id: str | None
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    segment_id: str
+    excerpt: str
+    quality_flags: list[str]
+
+    @model_validator(mode="after")
+    def has_ordered_range(self) -> "Evidence":
+        if self.end_ms < self.start_ms:
+            raise ValueError("evidence.end_ms must be greater than or equal to start_ms")
+        return self
+
+
+class ModelManifestEntry(ContractModel):
+    provider: str
+    model: str
+
+
+class Provenance(ContractModel):
+    skill_version: str
+    service_version: str | None
+    model_manifest: list[ModelManifestEntry]
+
+
+class MemoryResult(ContractModel):
+    written: bool
+    consent_basis: str | None
+
+
+class AnalysisResult(ContractModel):
+    schema_version: Literal["1.1"]
+    request_id: str
+    analysis_mode: AnalysisMode
+    scope: AnalysisScope
+    minutes: Minutes
+    content_analysis: list[ParticipantContentAnalysis]
+    participants: list[Participant]
+    vad_series: list[VadPoint]
+    interaction_events: list[FlexibleContractObject]
+    self_echo: SelfEcho
+    coaching: CoachingResult
+    insights: list[Insight]
+    evidence: list[Evidence]
+    uncertainties: list[str]
+    provenance: Provenance
+    memory: MemoryResult
 
 
 class JobView(BaseModel):
@@ -119,4 +337,3 @@ class Health(BaseModel):
     status: Literal["ok"]
     provider: str
     version: str
-

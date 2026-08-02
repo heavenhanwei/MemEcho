@@ -23,7 +23,8 @@ from fastapi.responses import StreamingResponse
 from . import __version__
 from .config import Settings, get_settings
 from .models import (
-    AnalyzeRequest,
+    AnalysisRequest,
+    AnalysisResult,
     ArtifactMetadata,
     ArtifactsResponse,
     ChatRequest,
@@ -329,7 +330,7 @@ async def get_participant_candidates(session_id: str) -> ParticipantsCandidatesR
     dependencies=[Depends(require_token)],
 )
 async def analyze(
-    session_id: str, payload: AnalyzeRequest, background: BackgroundTasks
+    session_id: str, payload: AnalysisRequest, background: BackgroundTasks
 ) -> JobView:
     if session_id not in store.sessions:
         raise HTTPException(status_code=404, detail="session not found")
@@ -373,9 +374,10 @@ async def job_events(job_id: str) -> StreamingResponse:
 
 @app.get(
     "/v1/sessions/{session_id}/result",
+    response_model=AnalysisResult,
     dependencies=[Depends(require_token)],
 )
-async def get_result(session_id: str) -> dict:
+async def get_result(session_id: str) -> AnalysisResult:
     session = store.sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="session not found")
