@@ -47,6 +47,11 @@ from .providers import (
     MockProvider,
     TranscriptionDownloader,
 )
+from .realtime import (
+    BailianRealtimeClient,
+    RealtimeConfigurationError,
+    RealtimeUpstreamDisconnected,
+)
 from .store import MemoryStore, UploadRecord
 
 
@@ -93,6 +98,7 @@ oss_client = AliyunOSSClient(settings, mock=is_mock)
 dashscope_client = DashScopeClient(settings, mock=is_mock)
 transcription_downloader = TranscriptionDownloader(settings, mock=is_mock)
 orchestrator = Orchestrator(store, provider, oss_client, dashscope_client, transcription_downloader)
+realtime_client_factory = BailianRealtimeClient
 
 
 @asynccontextmanager
@@ -456,6 +462,9 @@ async def live_transcript(websocket: WebSocket, session_id: str, token: str):
         await websocket.close(code=4401)
         return
     await websocket.accept()
+    if settings.memecho_provider == "bailian":
+        await _bailian_live_transcript(websocket)
+        return
     await websocket.send_json({"type": "connection.state", "state": "connected"})
     bytes_seen = 0
     try:
@@ -481,3 +490,133 @@ async def live_transcript(websocket: WebSocket, session_id: str, token: str):
                 return
     except WebSocketDisconnect:
         return
+
+
+async def _send_live_failure(
+    websocket: WebSocket,
+    *,
+    code: str,
+    message: str,
+    retryable: bool,
+) -> None:
+    await websocket.send_json(
+        {"type": "error", "code": code, "message": message, "retryable": retryable}
+    )
+    await websocket.send_json({"type": "connection.state", "state": "offline"})
+
+
+async def _bailian_live_transcript(websocket: WebSocket) -> None:
+    client = realtime_client_factory(settings)
+    desktop_task: asyncio.Task | None = None
+    upstream_task: asyncio.Task | None = None
+    try:
+        try:
+            await client.start()
+        except RealtimeConfigurationError as exc:
+            await _send_live_failure(
+                websocket,
+                code="realtime_configuration_error",
+                message=str(exc),
+                retryable=False,
+            )
+            return
+        except Exception:
+            await _send_live_failure(
+                websocket,
+                code="upstream_connect_failed",
+                message="Realtime transcription service is unavailable.",
+                retryable=True,
+            )
+            return
+
+        desktop_task = asyncio.create_task(websocket.receive())
+        upstream_task = asyncio.create_task(client.receive_event())
+        finishing = False
+
+        while True:
+            pending = {task for task in (desktop_task, upstream_task) if task}
+            timeout = (
+                settings.bailian_realtime_finish_timeout_seconds if finishing else None
+            )
+            done, _ = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=timeout,
+            )
+            if not done:
+                await _send_live_failure(
+                    websocket,
+                    code="upstream_finish_timeout",
+                    message="Realtime transcription did not finish in time.",
+                    retryable=True,
+                )
+                return
+
+            if upstream_task in done:
+                event = upstream_task.result()
+                if event is not None:
+                    await websocket.send_json(event)
+                    if (
+                        event.get("type") == "connection.state"
+                        and event.get("state") == "offline"
+                    ):
+                        return
+                    if (
+                        event.get("type") == "error"
+                        and event.get("code") == "upstream_disconnected"
+                    ):
+                        await websocket.send_json(
+                            {"type": "connection.state", "state": "offline"}
+                        )
+                        return
+                upstream_task = asyncio.create_task(client.receive_event())
+
+            if desktop_task in done:
+                message = desktop_task.result()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                chunk = message.get("bytes")
+                if chunk is not None:
+                    if len(chunk) > settings.bailian_realtime_max_frame_bytes:
+                        await _send_live_failure(
+                            websocket,
+                            code="audio_frame_too_large",
+                            message="The audio frame exceeds the gateway limit.",
+                            retryable=False,
+                        )
+                        return
+                    try:
+                        await client.send_audio(chunk)
+                    except RealtimeUpstreamDisconnected:
+                        await _send_live_failure(
+                            websocket,
+                            code="upstream_disconnected",
+                            message="Realtime transcription disconnected; retry it.",
+                            retryable=True,
+                        )
+                        return
+                    desktop_task = asyncio.create_task(websocket.receive())
+                elif message.get("text") == "end":
+                    try:
+                        await client.finish()
+                    except RealtimeUpstreamDisconnected:
+                        await _send_live_failure(
+                            websocket,
+                            code="upstream_disconnected",
+                            message="Realtime transcription disconnected; retry it.",
+                            retryable=True,
+                        )
+                        return
+                    finishing = True
+                    desktop_task = None
+                else:
+                    desktop_task = asyncio.create_task(websocket.receive())
+    except WebSocketDisconnect:
+        return
+    finally:
+        tasks = tuple(task for task in (desktop_task, upstream_task) if task)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await client.close()

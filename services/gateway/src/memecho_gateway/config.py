@@ -19,6 +19,16 @@ class Settings(BaseSettings):
     bailian_audio_api_key: str = ""
     bailian_realtime_ws_url: str = ""
     bailian_realtime_model: str = "qwen3-asr-flash-realtime"
+    bailian_workspace_id: str = ""
+    bailian_realtime_language: str = "zh"
+    bailian_realtime_sample_rate: int = 16000
+    bailian_realtime_vad_threshold: float = 0.2
+    bailian_realtime_silence_duration_ms: int = 800
+    bailian_realtime_heartbeat_seconds: float = 20.0
+    bailian_realtime_heartbeat_timeout_seconds: float = 20.0
+    bailian_realtime_close_timeout_seconds: float = 5.0
+    bailian_realtime_finish_timeout_seconds: float = 10.0
+    bailian_realtime_max_frame_bytes: int = 1024 * 1024
     bailian_diarization_model: str = "fun-asr"
     bailian_emotion_model: str = "qwen3-asr-flash-filetrans"
 
