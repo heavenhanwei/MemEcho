@@ -241,3 +241,33 @@ def test_artifact_json_excludes_rendered_fields(client: TestClient):
     assert exported == {"schema_version": "1.1", "summary": {"title": "result"}}
     assert response.json()["contents"]["markdown"] == "# report"
     assert response.json()["contents"]["html"] == "<h1>report</h1>"
+
+def test_session_rejects_unknown_fields(client: TestClient):
+    response = client.post(
+        "/v1/sessions",
+        headers=headers(),
+        json={
+            "title": "strict input",
+            "context": "work",
+            "occurred_at": "2026-08-02T10:00:00+08:00",
+            "source_mode": "import",
+            "unexpected": "must be rejected",
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "extra_forbidden"
+
+
+def test_analyze_rejects_unknown_fields(client: TestClient):
+    session = create_session(client)
+    response = client.post(
+        f"/v1/sessions/{session['id']}/analyze",
+        headers=headers(),
+        json={
+            "request_id": session["request_id"],
+            "schema_version": "1.1",
+            "unexpected": True,
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "extra_forbidden"

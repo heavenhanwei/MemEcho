@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import Any, Protocol
 
 from ..config import Settings
@@ -11,6 +13,9 @@ log = logging.getLogger(__name__)
 
 class OSSClient(Protocol):
     async def upload(self, key: str, data: bytes, content_type: str) -> str: ...
+    async def upload_file(
+        self, key: str, path: Path, content_type: str
+    ) -> str: ...
     async def signed_url(self, key: str, expires: int = 3600) -> str: ...
     async def delete(self, key: str) -> None: ...
 
@@ -32,6 +37,35 @@ class AliyunOSSClient:
         bucket.put_object(key, data, headers={"Content-Type": content_type})
         return f"oss://{self.settings.oss_bucket}/{key}"
 
+
+    async def upload_file(
+        self, key: str, path: Path, content_type: str = "audio/wav"
+    ) -> str:
+        """Upload a path without materializing the complete file as bytes."""
+        if self.mock:
+            chunks: list[bytes] = []
+            with path.open("rb") as source:
+                while chunk := source.read(self.settings.oss_part_size_bytes):
+                    chunks.append(chunk)
+            self._mock_store[key] = b"".join(chunks)
+            log.info("OSS mock file upload key=%s size=%d", key, path.stat().st_size)
+            return f"oss://{self.settings.oss_bucket}/{key}"
+
+        await asyncio.to_thread(self._resumable_upload, key, path, content_type)
+        return f"oss://{self.settings.oss_bucket}/{key}"
+
+    def _resumable_upload(self, key: str, path: Path, content_type: str) -> None:
+        import oss2
+
+        oss2.resumable_upload(
+            self._bucket(),
+            key,
+            str(path),
+            multipart_threshold=self.settings.oss_multipart_threshold_bytes,
+            part_size=self.settings.oss_part_size_bytes,
+            num_threads=1,
+            headers={"Content-Type": content_type},
+        )
     async def signed_url(self, key: str, expires: int = 3600) -> str:
         if self.mock:
             return f"https://mock-oss.example.com/{key}?expires={int(time.time()) + expires}"

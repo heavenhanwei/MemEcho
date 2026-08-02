@@ -7,6 +7,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class StrictRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class JobStatus(StrEnum):
     queued = "queued"
     uploading = "uploading"
@@ -43,7 +47,7 @@ class ArtifactsResponse(BaseModel):
     contents: dict[str, str]
 
 
-class SessionCreate(BaseModel):
+class SessionCreate(StrictRequest):
     title: str = Field(min_length=1, max_length=120)
     context: str = Field(default="工作", max_length=80)
     occurred_at: datetime
@@ -57,7 +61,7 @@ class SessionCreated(BaseModel):
     status: JobStatus
 
 
-class UploadCreate(BaseModel):
+class UploadCreate(StrictRequest):
     track: Literal["microphone", "system", "mixed", "import"]
     file_name: str
     mime_type: str
@@ -71,19 +75,18 @@ class UploadCreated(BaseModel):
     received_chunks: list[int]
 
 
-class UploadComplete(BaseModel):
+class UploadComplete(StrictRequest):
     upload_id: str
     sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
 
 
-class ParticipantResolution(BaseModel):
+class ParticipantResolution(StrictRequest):
     participants: list[dict[str, Any]]
     self_participant_id: str | None = None
     identity_basis: Literal["user_confirmed", "auto_single_speaker", "unknown"]
 
 
-class AnalyzeRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class AnalyzeRequest(StrictRequest):
     request_id: str
     schema_version: Literal["1.1"] = "1.1"
     focus: list[str] = Field(
@@ -106,7 +109,7 @@ class JobView(BaseModel):
     updated_at: datetime
 
 
-class ChatRequest(BaseModel):
+class ChatRequest(StrictRequest):
     question: str = Field(min_length=1, max_length=2000)
     result: dict[str, Any]
     evidence_ids: list[str] = Field(default_factory=list)

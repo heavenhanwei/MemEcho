@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     oss_access_key_id: str = ""
     oss_access_key_secret: str = ""
     oss_prefix: str = "memecho-tmp"
+    oss_multipart_threshold_bytes: int = 8 * 1024 * 1024
+    oss_part_size_bytes: int = 8 * 1024 * 1024
 
     chunk_size_bytes: int = 8 * 1024 * 1024
     max_session_seconds: int = 2 * 60 * 60

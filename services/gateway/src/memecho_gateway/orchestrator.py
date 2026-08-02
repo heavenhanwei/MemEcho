@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 
 from .alignment import align_intervals
 from .contracts import validate_result
 from .models import JobStatus
+from .providers.oss import make_oss_key
 from .quality import compute_quality_metrics
 from .rendering import render_html, render_markdown
 from .store import MemoryStore
@@ -29,6 +31,37 @@ class Orchestrator:
         self.dashscope = dashscope_client
         self.transcription = transcription_downloader
 
+    async def _collect_remote_observations(self, audio_url: str) -> dict[str, Any]:
+        calls: dict[str, Any] = {}
+        if self.dashscope:
+            calls["fun_asr"] = self.dashscope.submit_fun_asr(audio_url)
+            calls["emotion"] = self.dashscope.submit_emotion(audio_url)
+        if self.transcription:
+            calls["transcription"] = self.transcription.download(audio_url)
+        if not calls:
+            return {"diarization": [], "emotions": [], "transcript": [], "errors": []}
+
+        values = await asyncio.gather(*calls.values(), return_exceptions=True)
+        collected: dict[str, Any] = {
+            "diarization": [],
+            "emotions": [],
+            "transcript": [],
+            "errors": [],
+        }
+        for name, value in zip(calls, values, strict=True):
+            if isinstance(value, BaseException):
+                log.warning("Audio model failed source=%s", name, exc_info=value)
+                collected["errors"].append(
+                    {"source": name, "error_code": type(value).__name__}
+                )
+            elif name == "fun_asr":
+                collected["diarization"] = value.get("output", {}).get("results", [])
+            elif name == "emotion":
+                collected["emotions"] = value.get("output", {}).get("results", [])
+            else:
+                collected["transcript"] = value.get("transcript", [])
+        return collected
+
     async def run(self, job_id: str, session_id: str, request: dict[str, Any]) -> None:
         session = self.store.sessions[session_id]
         request = session.analysis_requests.get(job_id, request)
@@ -39,39 +72,40 @@ class Orchestrator:
 
             if not is_resume:
                 await self.store.update_job(job_id, JobStatus.transcribing, 20, "正式转写与说话人分离")
-                tracks = [
-                    str(upload.completed_path)
+                completed_uploads = [
+                    upload
                     for upload in session.uploads.values()
                     if upload.completed_path
                 ]
-
+                tracks = [str(upload.completed_path) for upload in completed_uploads]
                 diarization: list[dict[str, Any]] = []
                 emotions: list[dict[str, Any]] = []
                 transcription_segments: list[dict[str, Any]] = []
+                model_errors: list[dict[str, str]] = []
 
-                if self.oss and tracks:
-                    for track_path in tracks:
-                        from pathlib import Path
-
-                        p = Path(track_path)
-                        data = p.read_bytes()
-                        oss_key = f"memecho-tmp/{session_id}/{p.name}"
-                        await self.oss.upload(oss_key, data, "audio/wav")
+                remote_tracks: list[tuple[Any, Path, str]] = []
+                if self.oss and completed_uploads:
+                    prefix = getattr(
+                        getattr(self.oss, "settings", None),
+                        "oss_prefix",
+                        "memecho-tmp",
+                    )
+                    for upload in completed_uploads:
+                        path = Path(upload.completed_path)
+                        oss_key = make_oss_key(prefix, session_id, upload.id, path.name)
                         oss_keys.append(oss_key)
+                        await self.oss.upload_file(oss_key, path, upload.mime_type)
                         audio_url = await self.oss.signed_url(oss_key)
+                        remote_tracks.append((upload, path, audio_url))
 
-                        if self.dashscope:
-                            diar_result = await self.dashscope.submit_fun_asr(audio_url)
-                            diarization.extend(diar_result.get("output", {}).get("results", []))
-
-                            emo_result = await self.dashscope.submit_emotion(audio_url)
-                            emotions.extend(emo_result.get("output", {}).get("results", []))
-
-                if self.transcription and tracks:
-                    for oss_key in oss_keys:
-                        audio_url = await self.oss.signed_url(oss_key)
-                        tx = await self.transcription.download(audio_url)
-                        transcription_segments.extend(tx.get("transcript", []))
+                observations = await asyncio.gather(
+                    *(self._collect_remote_observations(item[2]) for item in remote_tracks)
+                )
+                for observation in observations:
+                    diarization.extend(observation["diarization"])
+                    emotions.extend(observation["emotions"])
+                    transcription_segments.extend(observation["transcript"])
+                    model_errors.extend(observation["errors"])
 
                 await self.store.update_job(job_id, JobStatus.aligning, 48, "对齐语言与声学证据")
                 if transcription_segments and (diarization or emotions):
@@ -81,19 +115,18 @@ class Orchestrator:
                     aligned = []
 
                 quality_metrics: list[dict[str, Any]] = []
-                if tracks:
-                    from pathlib import Path
-
-                    for track_path in tracks:
-                        p = Path(track_path)
-                        if p.suffix.lower() == ".wav":
-                            qm = compute_quality_metrics(p)
-                            quality_metrics.append(qm)
+                for upload in completed_uploads:
+                    path = Path(upload.completed_path)
+                    if path.suffix.lower() == ".wav":
+                        metrics = compute_quality_metrics(path)
+                        metrics["track"] = upload.track
+                        quality_metrics.append(metrics)
 
                 session.job_intermediates[job_id] = {
                     "aligned": aligned,
                     "quality_metrics": quality_metrics,
                     "tracks": tracks,
+                    "model_errors": model_errors,
                 }
             else:
                 intermediate = session.job_intermediates.get(job_id)
@@ -102,6 +135,7 @@ class Orchestrator:
                 aligned = intermediate.get("aligned", [])
                 quality_metrics = intermediate.get("quality_metrics", [])
                 tracks = intermediate.get("tracks", [])
+                model_errors = intermediate.get("model_errors", [])
 
             # Check participant resolution before analysis
             if not session.participant_resolution and aligned:
