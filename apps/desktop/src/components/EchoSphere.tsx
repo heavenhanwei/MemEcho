@@ -1,113 +1,22 @@
-import { Canvas, useFrame } from "@react-three/fiber";
-import { Float, Html } from "@react-three/drei";
-import { useMemo, useRef } from "react";
-import * as THREE from "three";
+import {
+  Component,
+  Suspense,
+  lazy,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
 import type { SoulState } from "../store";
 
-const vertexShader = `
-  uniform float uTime;
-  uniform float uEnergy;
-  varying vec3 vNormal;
-  varying vec3 vPosition;
-  float hash(vec3 p) { return fract(sin(dot(p, vec3(127.1,311.7,74.7))) * 43758.5453); }
-  float noise(vec3 p) {
-    vec3 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
-    return mix(mix(mix(hash(i),hash(i+vec3(1,0,0)),f.x),
-                   mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),f.x),f.y),
-               mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),f.x),
-                   mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x),f.y),f.z);
-  }
-  void main() {
-    vNormal = normal;
-    float n = noise(position * 1.45 + vec3(uTime * .11, -uTime * .08, uTime * .06));
-    float wave = sin(position.y * 4.0 + uTime * 1.15) * .035;
-    vec3 moved = position + normal * ((n - .5) * .22 + wave + uEnergy * .16);
-    vPosition = moved;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(moved, 1.0);
-  }
-`;
-
-const fragmentShader = `
-  uniform float uTime;
-  uniform vec3 uColorA;
-  uniform vec3 uColorB;
-  varying vec3 vNormal;
-  varying vec3 vPosition;
-  void main() {
-    float fresnel = pow(1.0 - abs(dot(normalize(vNormal), vec3(0.0,0.0,1.0))), 2.1);
-    float flow = sin(vPosition.y * 3.2 + vPosition.x * 2.1 + uTime * .5) * .5 + .5;
-    vec3 color = mix(uColorA, uColorB, flow);
-    float alpha = .56 + fresnel * .3;
-    gl_FragColor = vec4(color + fresnel * .22, alpha);
-  }
-`;
-
-function SphereMesh({
-  state,
-  energy,
-}: {
+export interface EchoSphereVisualProps {
   state: SoulState;
   energy: number;
-}) {
-  const mesh = useRef<THREE.Mesh>(null);
-  const material = useRef<THREE.ShaderMaterial>(null);
-  const uniforms = useMemo(
-    () => ({
-      uTime: { value: 0 },
-      uEnergy: { value: 0 },
-      uColorA: { value: new THREE.Color("#725ed7") },
-      uColorB: { value: new THREE.Color("#b5d9d0") },
-    }),
-    [],
-  );
-  useFrame((clock, delta) => {
-    if (!mesh.current || !material.current) return;
-    uniforms.uTime.value = clock.clock.elapsedTime;
-    uniforms.uEnergy.value = THREE.MathUtils.lerp(
-      uniforms.uEnergy.value,
-      state === "recording" ? Math.max(energy, 0.12) : state === "processing" ? 0.3 : 0.04,
-      0.08,
-    );
-    mesh.current.rotation.y += delta * (state === "processing" ? 0.22 : 0.06);
-    const target = state === "paused" ? 0.91 : state === "responding" ? 1.06 : 1;
-    mesh.current.scale.lerp(new THREE.Vector3(target, target, target), 0.04);
-  });
-  return (
-    <Float speed={state === "paused" ? 0.3 : 1.1} rotationIntensity={0.16} floatIntensity={0.25}>
-      <mesh ref={mesh}>
-        <icosahedronGeometry args={[1.42, 32]} />
-        <shaderMaterial
-          ref={material}
-          args={[{ uniforms, vertexShader, fragmentShader, transparent: true }]}
-          depthWrite={false}
-        />
-      </mesh>
-    </Float>
-  );
 }
 
-function MemoryPoints() {
-  const points = useMemo(
-    () => [
-      [-1.05, 0.62, 0.8],
-      [0.88, 0.76, 0.9],
-      [0.56, -1.05, 0.78],
-      [-0.74, -0.86, 0.9],
-      [0.1, 1.3, 0.5],
-    ],
-    [],
-  );
-  return (
-    <>
-      {points.map((position, index) => (
-        <mesh key={index} position={position as [number, number, number]}>
-          <sphereGeometry args={[0.055, 16, 16]} />
-          <meshBasicMaterial color={index % 2 ? "#f1b49f" : "#fff7dc"} />
-        </mesh>
-      ))}
-    </>
-  );
-}
+const LazyEchoSphereWebGL = lazy(async () => {
+  const module = await import("./EchoSphereWebGL");
+  return { default: module.EchoSphereWebGL };
+});
 
 function prefersReducedMotion() {
   return (
@@ -117,9 +26,31 @@ function prefersReducedMotion() {
   );
 }
 
+function usePrefersReducedMotion() {
+  const [reduced, setReduced] = useState(prefersReducedMotion);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReduced(query.matches);
+    update();
+    if (typeof query.addEventListener === "function") {
+      query.addEventListener("change", update);
+      return () => query.removeEventListener("change", update);
+    }
+    query.addListener(update);
+    return () => query.removeListener(update);
+  }, []);
+
+  return reduced;
+}
+
 function supportsWebGL() {
   if (
     typeof window === "undefined" ||
+    typeof document === "undefined" ||
     (typeof window.WebGLRenderingContext === "undefined" &&
       typeof window.WebGL2RenderingContext === "undefined")
   ) {
@@ -134,53 +65,65 @@ function supportsWebGL() {
   }
 }
 
+function StaticSphere() {
+  return (
+    <div className="sphere-static" data-testid="sphere-static">
+      <div className="sphere-fallback" aria-label="memEcho 活动球体" />
+    </div>
+  );
+}
+
+class SphereLoadBoundary extends Component<
+  { fallback: ReactNode; children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
 export function EchoSphere({
   state,
   energy,
   onActivate,
-}: {
-  state: SoulState;
-  energy: number;
+}: EchoSphereVisualProps & {
   onActivate?: () => void;
 }) {
-  const useStatic = prefersReducedMotion() || !supportsWebGL();
-  const hitButton = onActivate ? (
-    <button
-      className="sphere-hit"
-      aria-label={state === "idle" ? "开始录音" : "memEcho 当前状态"}
-      onClick={onActivate}
-    />
-  ) : null;
+  const reducedMotion = usePrefersReducedMotion();
+  const [webGLAvailable] = useState(supportsWebGL);
+  const fallback = <StaticSphere />;
+  const useWebGL = webGLAvailable && !reducedMotion;
+
   return (
-    <div className={`sphere-stage is-${state}`}>
+    <div
+      className={`sphere-stage is-${state}`}
+      data-renderer={useWebGL ? "webgl-lazy" : "static"}
+    >
       <div className="echo-shell shell-one" />
       <div className="echo-shell shell-two" />
-      {useStatic ? (
-        <div className="sphere-static" data-testid="sphere-static">
-          <div className="sphere-fallback" aria-label="memEcho 活动球体" />
-          {hitButton}
-        </div>
+      {useWebGL ? (
+        <SphereLoadBoundary fallback={fallback}>
+          <Suspense fallback={fallback}>
+            <LazyEchoSphereWebGL state={state} energy={energy} />
+          </Suspense>
+        </SphereLoadBoundary>
       ) : (
-        <Canvas
-          camera={{ position: [0, 0, 4.6], fov: 42 }}
-          dpr={[1, 1.7]}
-          gl={{ alpha: true, antialias: true }}
-          fallback={<div className="sphere-fallback" aria-label="memEcho 活动球体" />}
-        >
-          <ambientLight intensity={1.4} />
-          <pointLight position={[2, 2, 3]} intensity={4} color="#ffffff" />
-          <pointLight position={[-3, -1, 2]} intensity={2.5} color="#9d8df1" />
-          <SphereMesh state={state} energy={energy} />
-          {state === "memory" && <MemoryPoints />}
-          {onActivate && (
-            <Html center transform>
-              {hitButton}
-            </Html>
-          )}
-        </Canvas>
+        fallback
+      )}
+      {onActivate && (
+        <button
+          className="sphere-hit"
+          aria-label={state === "idle" ? "开始录音" : "memEcho 当前状态"}
+          onClick={onActivate}
+        />
       )}
       <div className="sphere-glint" />
     </div>
   );
 }
-

@@ -114,13 +114,17 @@ main { min-width: 0; overflow: hidden; }
 .meter-note { color: #a5644e; font-size: 10px; margin: 4px 0; }
 .soul-column { min-height: 535px; position: relative; display: grid; place-items: center; }
 .sphere-stage { width: min(520px, 42vw); aspect-ratio: 1; position: relative; }
+.sphere-webgl { position: absolute; inset: 0; z-index: 3; }
 .sphere-stage canvas { position: relative; z-index: 3; }
 .sphere-glint {
   position: absolute; width: 38%; height: 15%; left: 30%; top: 17%;
   border-radius: 50%; background: rgba(255,255,255,.33); filter: blur(25px);
   transform: rotate(-16deg); pointer-events: none; z-index: 4;
 }
-.sphere-hit { width: 210px; height: 210px; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+.sphere-hit {
+  position: absolute; left: 50%; top: 50%; z-index: 6; transform: translate(-50%, -50%);
+  width: 210px; height: 210px; border: 0; border-radius: 50%; background: transparent; cursor: pointer;
+}
 .sphere-fallback {
   width: 58%; aspect-ratio: 1; border-radius: 45% 55% 51% 49%;
   background: radial-gradient(circle at 35% 25%, #efe9ff, #725ed7 68%, #4c3da4);
