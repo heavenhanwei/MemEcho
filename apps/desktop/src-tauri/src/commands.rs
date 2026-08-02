@@ -387,6 +387,39 @@ pub fn get_analysis_results(
         .map_err(|e| e.to_string())
 }
 
+/// Copy an imported MP3/WAV/M4A/MP4 into a new private local session.
+#[tauri::command]
+pub fn import_media_file(
+    source_path: String,
+    title: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<crate::importer::ImportedSession, String> {
+    crate::importer::import_media_file_impl(
+        &source_path,
+        title.as_deref(),
+        &state.sessions_dir,
+        &state.db,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Save UTF-8 text as the source of a new private local session.
+#[tauri::command]
+pub fn import_text_content(
+    text: String,
+    title: Option<String>,
+    source_name: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<crate::importer::ImportedSession, String> {
+    crate::importer::import_text_content_impl(
+        &text,
+        title.as_deref(),
+        source_name.as_deref(),
+        &state.sessions_dir,
+        &state.db,
+    )
+    .map_err(|error| error.to_string())
+}
 /// Upload session audio tracks to the gateway.
 ///
 /// Validates IDs and URL, reads gateway token from Windows Credential Manager,

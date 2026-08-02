@@ -68,6 +68,39 @@ export interface SavedReportFiles {
   markdown_path: string;
   html_path: string;
 }
+export interface LocalSession {
+  id: string;
+  title: string | null;
+  status: string;
+  mic_path: string | null;
+  loopback_path: string | null;
+  sample_rate: number;
+  started_at: string;
+  ended_at: string | null;
+  duration_secs: number | null;
+  recovery_status: string | null;
+  error_code: string | null;
+  source_mode: "recording" | "import";
+  source_path: string | null;
+  source_name: string | null;
+  source_mime_type: string | null;
+  source_size_bytes: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ImportedSource {
+  kind: "media" | "text";
+  path: string;
+  original_name: string;
+  mime_type: string;
+  size: number;
+}
+
+export interface ImportedSession {
+  session: LocalSession;
+  source: ImportedSource;
+}
 
 export class DesktopRuntimeRequiredError extends Error {
   constructor(operation: string) {
@@ -118,6 +151,29 @@ export const bridge = {
   credentialDelete: (name: string) =>
     invoke<void>("credential_delete", { name }),
 
+  importMediaFile: async (
+    sourcePath: string,
+    title?: string | null,
+  ): Promise<ImportedSession> => {
+    requireDesktopRuntime("Media import");
+    return invoke<ImportedSession>("import_media_file", {
+      sourcePath,
+      title: title ?? null,
+    });
+  },
+
+  importTextContent: async (
+    text: string,
+    title?: string | null,
+    sourceName?: string | null,
+  ): Promise<ImportedSession> => {
+    requireDesktopRuntime("Text import");
+    return invoke<ImportedSession>("import_text_content", {
+      text,
+      title: title ?? null,
+      sourceName: sourceName ?? null,
+    });
+  },
   uploadSessionTracks: async (
     localSessionId: string,
     gatewaySessionId: string,

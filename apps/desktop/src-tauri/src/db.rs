@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     duration_secs REAL,
     recovery_status TEXT,
     error_code TEXT,
+    source_mode TEXT NOT NULL DEFAULT 'recording',
+    source_path TEXT,
+    source_name TEXT,
+    source_mime_type TEXT,
+    source_size_bytes INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -95,6 +100,11 @@ pub struct LocalSession {
     pub duration_secs: Option<f64>,
     pub recovery_status: Option<String>,
     pub error_code: Option<String>,
+    pub source_mode: String,
+    pub source_path: Option<String>,
+    pub source_name: Option<String>,
+    pub source_mime_type: Option<String>,
+    pub source_size_bytes: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -172,6 +182,8 @@ pub enum DbError {
     PathTraversal,
     #[error("foreign key violation: {0}")]
     ForeignKeyViolation(String),
+    #[error("database schema version {found} is newer than supported version {supported}")]
+    UnsupportedSchemaVersion { found: i32, supported: i32 },
 }
 
 // ── Repository ──────────────────────────────────────────────────────────────
@@ -201,17 +213,28 @@ impl Repository {
             )
             .unwrap_or(0);
 
+        if current > SCHEMA_VERSION {
+            return Err(DbError::UnsupportedSchemaVersion {
+                found: current,
+                supported: SCHEMA_VERSION,
+            });
+        }
         if current == 0 {
             conn.execute_batch(SCHEMA_SQL)?;
             conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?1)",
                 params![SCHEMA_VERSION],
             )?;
-        } else if current < SCHEMA_VERSION {
-            // Future migrations go here
-            conn.execute(
-                "UPDATE schema_version SET version = ?1",
-                params![SCHEMA_VERSION],
+        } else if current == 1 {
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE sessions ADD COLUMN source_mode TEXT NOT NULL DEFAULT 'recording';
+                 ALTER TABLE sessions ADD COLUMN source_path TEXT;
+                 ALTER TABLE sessions ADD COLUMN source_name TEXT;
+                 ALTER TABLE sessions ADD COLUMN source_mime_type TEXT;
+                 ALTER TABLE sessions ADD COLUMN source_size_bytes INTEGER;
+                 UPDATE schema_version SET version = 2;
+                 COMMIT;",
             )?;
         }
         Ok(())
@@ -233,6 +256,41 @@ impl Repository {
         conn.execute(
             "INSERT INTO sessions (id, title, status, mic_path, loopback_path, sample_rate, started_at, recovery_status, created_at, updated_at) VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
             params![id, title, mic_path, loopback_path, sample_rate, now, recovery_status, now],
+        )?;
+        drop(conn);
+        self.get_session(id)
+    }
+    pub fn create_import_session(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        source_path: &str,
+        source_name: &str,
+        source_mime_type: &str,
+        source_size_bytes: u64,
+    ) -> Result<LocalSession, DbError> {
+        let source_size_bytes = i64::try_from(source_size_bytes)
+            .map_err(|_| DbError::Path("import source size exceeds SQLite range".to_string()))?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                id, title, status, sample_rate, started_at, recovery_status,
+                source_mode, source_path, source_name, source_mime_type,
+                source_size_bytes, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, 'active', 0, ?3, 'finalized',
+                'import', ?4, ?5, ?6, ?7, ?3, ?3
+             )",
+            params![
+                id,
+                title,
+                now,
+                source_path,
+                source_name,
+                source_mime_type,
+                source_size_bytes
+            ],
         )?;
         drop(conn);
         self.get_session(id)
@@ -264,7 +322,7 @@ impl Repository {
     pub fn get_session(&self, id: &str) -> Result<LocalSession, DbError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, title, status, mic_path, loopback_path, sample_rate, started_at, ended_at, duration_secs, recovery_status, error_code, created_at, updated_at FROM sessions WHERE id = ?1",
+            "SELECT id, title, status, mic_path, loopback_path, sample_rate, started_at, ended_at, duration_secs, recovery_status, error_code, source_mode, source_path, source_name, source_mime_type, source_size_bytes, created_at, updated_at FROM sessions WHERE id = ?1",
             params![id],
             |row| {
                 Ok(LocalSession {
@@ -279,8 +337,13 @@ impl Repository {
                     duration_secs: row.get(8)?,
                     recovery_status: row.get(9)?,
                     error_code: row.get(10)?,
-                    created_at: row.get(11)?,
-                    updated_at: row.get(12)?,
+                    source_mode: row.get(11)?,
+                    source_path: row.get(12)?,
+                    source_name: row.get(13)?,
+                    source_mime_type: row.get(14)?,
+                    source_size_bytes: row.get(15)?,
+                    created_at: row.get(16)?,
+                    updated_at: row.get(17)?,
                 })
             },
         )
@@ -296,7 +359,7 @@ impl Repository {
         let conn = self.conn.lock().unwrap();
         let result = if let Some(status) = status_filter {
             let mut s = conn.prepare(
-                "SELECT id, title, status, mic_path, loopback_path, sample_rate, started_at, ended_at, duration_secs, recovery_status, error_code, created_at, updated_at FROM sessions WHERE status = ?1 ORDER BY created_at DESC"
+                "SELECT id, title, status, mic_path, loopback_path, sample_rate, started_at, ended_at, duration_secs, recovery_status, error_code, source_mode, source_path, source_name, source_mime_type, source_size_bytes, created_at, updated_at FROM sessions WHERE status = ?1 ORDER BY created_at DESC"
             )?;
             let rows = s.query_map(params![status], |row| {
                 Ok(LocalSession {
@@ -311,14 +374,19 @@ impl Repository {
                     duration_secs: row.get(8)?,
                     recovery_status: row.get(9)?,
                     error_code: row.get(10)?,
-                    created_at: row.get(11)?,
-                    updated_at: row.get(12)?,
+                    source_mode: row.get(11)?,
+                    source_path: row.get(12)?,
+                    source_name: row.get(13)?,
+                    source_mime_type: row.get(14)?,
+                    source_size_bytes: row.get(15)?,
+                    created_at: row.get(16)?,
+                    updated_at: row.get(17)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         } else {
             let mut s = conn.prepare(
-                "SELECT id, title, status, mic_path, loopback_path, sample_rate, started_at, ended_at, duration_secs, recovery_status, error_code, created_at, updated_at FROM sessions ORDER BY created_at DESC"
+                "SELECT id, title, status, mic_path, loopback_path, sample_rate, started_at, ended_at, duration_secs, recovery_status, error_code, source_mode, source_path, source_name, source_mime_type, source_size_bytes, created_at, updated_at FROM sessions ORDER BY created_at DESC"
             )?;
             let rows = s.query_map([], |row| {
                 Ok(LocalSession {
@@ -333,8 +401,13 @@ impl Repository {
                     duration_secs: row.get(8)?,
                     recovery_status: row.get(9)?,
                     error_code: row.get(10)?,
-                    created_at: row.get(11)?,
-                    updated_at: row.get(12)?,
+                    source_mode: row.get(11)?,
+                    source_path: row.get(12)?,
+                    source_name: row.get(13)?,
+                    source_mime_type: row.get(14)?,
+                    source_size_bytes: row.get(15)?,
+                    created_at: row.get(16)?,
+                    updated_at: row.get(17)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -680,12 +753,94 @@ mod tests {
         assert_eq!(s.title.as_deref(), Some("Test Session"));
         assert_eq!(s.status, "active");
         assert_eq!(s.sample_rate, 16000);
+        assert_eq!(s.source_mode, "recording");
+        assert!(s.source_path.is_none());
         assert!(s.mic_path.is_some());
         assert!(s.loopback_path.is_some());
         assert!(s.started_at.len() > 0);
         assert!(s.created_at.len() > 0);
         let got = repo.get_session("s1").unwrap();
         assert_eq!(got.id, "s1");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_create_import_session_records_private_source_metadata() {
+        let (repo, dir) = temp_repo();
+        let source_path = dir.join("sessions/import-1/import.m4a");
+        let source_path = source_path.to_string_lossy().into_owned();
+
+        let session = repo
+            .create_import_session(
+                "import-1",
+                Some("Imported conversation"),
+                &source_path,
+                "conversation.m4a",
+                "audio/mp4",
+                42,
+            )
+            .unwrap();
+
+        assert_eq!(session.source_mode, "import");
+        assert_eq!(session.source_path.as_deref(), Some(source_path.as_str()));
+        assert_eq!(session.source_name.as_deref(), Some("conversation.m4a"));
+        assert_eq!(session.source_mime_type.as_deref(), Some("audio/mp4"));
+        assert_eq!(session.source_size_bytes, Some(42));
+        assert_eq!(session.sample_rate, 0);
+        assert_eq!(session.recovery_status.as_deref(), Some("finalized"));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_migrates_v1_sessions_to_v2_without_losing_data() {
+        let dir = std::env::temp_dir().join(format!("memecho_db_v1_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("legacy.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version (version) VALUES (1);
+                 CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    mic_path TEXT,
+                    loopback_path TEXT,
+                    sample_rate INTEGER NOT NULL DEFAULT 16000,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    duration_secs REAL,
+                    recovery_status TEXT,
+                    error_code TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO sessions (
+                    id, title, status, mic_path, loopback_path, sample_rate,
+                    started_at, recovery_status, created_at, updated_at
+                 ) VALUES (
+                    'legacy-1', 'Legacy recording', 'completed', 'mic.wav',
+                    'loopback.wav', 16000, '2026-01-01T00:00:00Z',
+                    'finalized', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+                 );",
+            )
+            .unwrap();
+        }
+
+        let repo = Repository::open(&db_path).unwrap();
+        let session = repo.get_session("legacy-1").unwrap();
+        assert_eq!(session.title.as_deref(), Some("Legacy recording"));
+        assert_eq!(session.source_mode, "recording");
+        assert!(session.source_path.is_none());
+        let conn = repo.conn.lock().unwrap();
+        let version: i32 = conn
+            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        drop(conn);
+
         cleanup(&dir);
     }
 

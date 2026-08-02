@@ -25,6 +25,8 @@ pub enum UploadError {
     Credential(String),
     #[error("audio file not found: {0}")]
     FileNotFound(String),
+    #[error("import error: {0}")]
+    Import(#[from] crate::importer::ImportError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("http error: {0}")]
@@ -165,6 +167,7 @@ async fn upload_track(
     gateway_session_id: &str,
     token: &str,
     track_name: &str,
+    mime_type: &str,
     file_path: &Path,
 ) -> Result<TrackUploadResult, UploadError> {
     let (sha256, file_size) = compute_sha256_streaming(file_path)?;
@@ -186,7 +189,7 @@ async fn upload_track(
         .json(&serde_json::json!({
             "track": track_name,
             "file_name": file_name,
-            "mime_type": "audio/wav",
+            "mime_type": mime_type,
             "size": file_size,
             "sha256": sha256,
         }))
@@ -351,10 +354,31 @@ pub async fn upload_session_tracks_with_token(
     let session_dir = crate::paths::validate_session_path(&local_session_id, sessions_dir)
         .map_err(|_| UploadError::InvalidSessionId)?;
 
-    // Locate WAV files
+    let client = Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()?;
+
+    if let Some(import_path) = crate::importer::find_import_media(&session_dir)? {
+        let mime_type = crate::importer::media_mime_type(&import_path)?;
+        let import_result = upload_track(
+            &client,
+            &base_url,
+            &gateway_session_id,
+            &token,
+            "import",
+            mime_type,
+            &import_path,
+        )
+        .await?;
+        return Ok(UploadSessionTracksResult {
+            total_bytes: import_result.size,
+            uploads: vec![import_result],
+        });
+    }
+
     let mic_path = crate::paths::mic_wav_path(&session_dir);
     let loopback_path = crate::paths::loopback_wav_path(&session_dir);
-
     if !mic_path.exists() {
         return Err(UploadError::FileNotFound("mic.wav not found".into()));
     }
@@ -362,18 +386,13 @@ pub async fn upload_session_tracks_with_token(
         return Err(UploadError::FileNotFound("loopback.wav not found".into()));
     }
 
-    let client = Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()?;
-
-    // Upload both tracks
     let mic_result = upload_track(
         &client,
         &base_url,
         &gateway_session_id,
         &token,
         "microphone",
+        "audio/wav",
         &mic_path,
     )
     .await?;
@@ -383,6 +402,7 @@ pub async fn upload_session_tracks_with_token(
         &gateway_session_id,
         &token,
         "system",
+        "audio/wav",
         &loopback_path,
     )
     .await?;

@@ -133,6 +133,69 @@ describe("bridge recovery + credential commands", () => {
   });
 });
 
+describe("bridge import commands", () => {
+  const response = {
+    session: { id: "local-import", source_mode: "import" },
+    source: {
+      kind: "media",
+      path: "C:\\private\\import.mp3",
+      original_name: "meeting.mp3",
+      mime_type: "audio/mpeg",
+      size: 42,
+    },
+  };
+
+  it("forwards a selected media path without exposing a web fallback", async () => {
+    const calls = installMock((cmd) => (cmd === "import_media_file" ? response : null));
+    await expect(
+      bridge.importMediaFile("C:\\incoming\\meeting.mp3", "Weekly review"),
+    ).resolves.toEqual(response);
+    expect(calls[0]).toEqual({
+      cmd: "import_media_file",
+      args: {
+        sourcePath: "C:\\incoming\\meeting.mp3",
+        title: "Weekly review",
+      },
+    });
+  });
+
+  it("forwards UTF-8 text and optional source metadata", async () => {
+    const textResponse = {
+      ...response,
+      source: {
+        ...response.source,
+        kind: "text",
+        path: "C:\\private\\source.txt",
+        original_name: "notes.txt",
+        mime_type: "text/plain; charset=utf-8",
+      },
+    };
+    const calls = installMock((cmd) =>
+      cmd === "import_text_content" ? textResponse : null,
+    );
+    await expect(
+      bridge.importTextContent("事实、观点、态度", "复盘", "notes.txt"),
+    ).resolves.toEqual(textResponse);
+    expect(calls[0]).toEqual({
+      cmd: "import_text_content",
+      args: {
+        text: "事实、观点、态度",
+        title: "复盘",
+        sourceName: "notes.txt",
+      },
+    });
+  });
+
+  it("rejects imports outside the installed desktop runtime", async () => {
+    clearMocks();
+    await expect(bridge.importMediaFile("C:\\meeting.mp3")).rejects.toMatchObject({
+      name: "DesktopRuntimeRequiredError",
+    });
+    await expect(bridge.importTextContent("text")).rejects.toThrow(
+      "installed memEcho desktop app",
+    );
+  });
+});
 describe("bridge desktop persistence commands", () => {
   it("forwards upload arguments and preserves snake_case response fields", async () => {
     const response = {

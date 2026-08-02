@@ -500,6 +500,81 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_upload_import_track_success_with_media_mime() {
+        let mock_server = MockServer::start().await;
+        let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let session_id = format!("import-{}", unique_id());
+        let session_dir = sessions_dir.join(&session_id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let content = b"authorized-m4a-content";
+        std::fs::write(session_dir.join("import.m4a"), content).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        let expected_sha = hex::encode(hasher.finalize());
+        let expected_size = content.len() as u64;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/v1/sessions/gw-import/uploads$"))
+            .and(wiremock::matchers::body_json(json!({
+                "file_name": "import.m4a",
+                "mime_type": "audio/mp4",
+                "size": expected_size,
+                "sha256": expected_sha,
+                "track": "import"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_id": "upload-import-001",
+                "chunk_size": 4194304
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"/v1/sessions/gw-import/uploads/upload-import-001/chunks/0$",
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(
+                r"/v1/sessions/gw-import/uploads/upload-import-001/complete$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_id": "upload-import-001",
+                "size": expected_size,
+                "sha256": expected_sha,
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let result = memecho_desktop_lib::upload::upload_session_tracks_with_token(
+            session_id,
+            "gw-import".to_string(),
+            mock_server.uri(),
+            &sessions_dir,
+            TEST_TOKEN.to_string(),
+        )
+        .await
+        .expect("import upload should succeed");
+
+        assert_eq!(result.uploads.len(), 1);
+        assert_eq!(result.uploads[0].track, "import");
+        assert_eq!(result.uploads[0].upload_id, "upload-import-001");
+        assert_eq!(result.uploads[0].size, expected_size);
+        assert_eq!(result.uploads[0].sha256, expected_sha);
+        assert_eq!(result.total_bytes, expected_size);
+
+        std::fs::remove_dir_all(&sessions_dir).ok();
+    }
+
+    #[tokio::test]
     async fn test_upload_chunk_retry_on_failure() {
         let mock_server = MockServer::start().await;
         let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
