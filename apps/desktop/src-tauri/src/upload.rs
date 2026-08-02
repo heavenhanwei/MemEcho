@@ -37,6 +37,20 @@ pub enum UploadError {
         expected: String,
         actual: String,
     },
+    #[error("upload id mismatch for {track}: expected {expected}, got {actual}")]
+    UploadIdMismatch {
+        track: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("size mismatch for {track}: expected {expected}, got {actual}")]
+    SizeMismatch {
+        track: String,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("invalid chunk_size from server: {0} (must be 1..={max})", max = MAX_CHUNK_SIZE)]
+    InvalidChunkSize(usize),
     #[error("upload failed after {attempts} retries: {reason}")]
     RetryExhausted { attempts: u32, reason: String },
 }
@@ -119,6 +133,14 @@ fn sanitize_error_body(body: &str) -> String {
     }
 }
 
+/// Strip a known token value from an error body to prevent leaking credentials.
+fn strip_token(body: &str, token: &str) -> String {
+    if token.is_empty() || !body.contains(token) {
+        return body.to_string();
+    }
+    body.replace(token, "[REDACTED]")
+}
+
 /// Compute SHA-256 of a file by streaming it in chunks.
 pub fn compute_sha256_streaming(path: &Path) -> Result<(String, u64), UploadError> {
     let mut file = std::fs::File::open(path)?;
@@ -176,19 +198,16 @@ async fn upload_track(
         let body = create_resp.text().await.unwrap_or_default();
         return Err(UploadError::GatewayError {
             status,
-            body: sanitize_error_body(&body),
+            body: sanitize_error_body(&strip_token(&body, token)),
         });
     }
 
     let create_data: CreateUploadResponse = create_resp.json().await?;
     let upload_id = create_data.upload_id;
-    let chunk_size = if create_data.chunk_size > 0 && create_data.chunk_size <= MAX_CHUNK_SIZE {
-        create_data.chunk_size
-    } else if create_data.chunk_size > MAX_CHUNK_SIZE {
-        MAX_CHUNK_SIZE
-    } else {
-        CHUNK_SIZE
-    };
+    if create_data.chunk_size == 0 || create_data.chunk_size > MAX_CHUNK_SIZE {
+        return Err(UploadError::InvalidChunkSize(create_data.chunk_size));
+    }
+    let chunk_size = create_data.chunk_size;
 
     // Upload chunks with retry
     let mut file = std::fs::File::open(file_path)?;
@@ -269,11 +288,29 @@ async fn upload_track(
         let body = complete_resp.text().await.unwrap_or_default();
         return Err(UploadError::GatewayError {
             status,
-            body: sanitize_error_body(&body),
+            body: sanitize_error_body(&strip_token(&body, token)),
         });
     }
 
     let complete_data: CompleteUploadResponse = complete_resp.json().await?;
+
+    // Verify upload_id roundtrip
+    if complete_data.upload_id != upload_id {
+        return Err(UploadError::UploadIdMismatch {
+            track: track_name.to_string(),
+            expected: upload_id,
+            actual: complete_data.upload_id,
+        });
+    }
+
+    // Verify size matches local file
+    if complete_data.size != file_size {
+        return Err(UploadError::SizeMismatch {
+            track: track_name.to_string(),
+            expected: file_size,
+            actual: complete_data.size,
+        });
+    }
 
     // Verify checksum
     if complete_data.sha256 != sha256 {
@@ -292,12 +329,16 @@ async fn upload_track(
     })
 }
 
-/// Main entry point: upload both mic and loopback tracks for a session.
-pub async fn upload_session_tracks_impl(
+/// Testable upload entry: upload both mic and loopback tracks with an explicit token.
+///
+/// This function accepts the gateway token directly so integration tests can
+/// inject a mock token without touching Windows Credential Manager.
+pub async fn upload_session_tracks_with_token(
     local_session_id: String,
     gateway_session_id: String,
     gateway_base_url: String,
     sessions_dir: &Path,
+    token: String,
 ) -> Result<UploadSessionTracksResult, UploadError> {
     // Validate IDs
     validate_id(&local_session_id)?;
@@ -305,10 +346,6 @@ pub async fn upload_session_tracks_impl(
 
     // Validate URL
     let base_url = validate_gateway_url(&gateway_base_url)?;
-
-    // Read token from credential manager
-    let token = crate::credential::credential_get("gateway_token")
-        .map_err(|e| UploadError::Credential(format!("failed to read gateway_token: {}", e)))?;
 
     // Locate session directory and validate path
     let session_dir = crate::paths::validate_session_path(&local_session_id, sessions_dir)
@@ -356,6 +393,43 @@ pub async fn upload_session_tracks_impl(
         uploads: vec![mic_result, loopback_result],
         total_bytes,
     })
+}
+
+/// Production entry point: upload both mic and loopback tracks for a session.
+///
+/// Reads the gateway token from Windows Credential Manager, then delegates to
+/// `upload_session_tracks_with_token`.
+pub async fn upload_session_tracks_impl(
+    local_session_id: String,
+    gateway_session_id: String,
+    gateway_base_url: String,
+    sessions_dir: &Path,
+) -> Result<UploadSessionTracksResult, UploadError> {
+    let token = crate::credential::credential_get("gateway_token")
+        .map_err(|e| UploadError::Credential(format!("failed to read gateway_token: {}", e)))?;
+
+    upload_session_tracks_with_token(
+        local_session_id,
+        gateway_session_id,
+        gateway_base_url,
+        sessions_dir,
+        token,
+    )
+    .await
+    .map_err(sanitize_upload_error)
+}
+
+/// Sanitize upload errors to strip any token values that may have leaked
+/// into error messages (e.g., from reqwest debug formatting).
+fn sanitize_upload_error(err: UploadError) -> UploadError {
+    let msg = err.to_string();
+    // Strip any bearer token or Authorization header values
+    let sanitized = sanitize_error_body(&msg);
+    if sanitized != msg {
+        UploadError::Credential("authentication error (details redacted)".into())
+    } else {
+        err
+    }
 }
 
 #[cfg(test)]
@@ -458,5 +532,44 @@ mod tests {
         // Verify constants are consistent
         assert_eq!(MAX_CHUNK_SIZE, 8 * 1024 * 1024);
         assert!(CHUNK_SIZE <= MAX_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn test_strip_token_redacts_value() {
+        let body = "Unauthorized: bad token my-secret-token-123";
+        let stripped = strip_token(body, "my-secret-token-123");
+        assert_eq!(stripped, "Unauthorized: bad token [REDACTED]");
+        assert!(!stripped.contains("my-secret-token-123"));
+    }
+
+    #[test]
+    fn test_strip_token_noop_when_absent() {
+        let body = "some error message";
+        let stripped = strip_token(body, "not-present");
+        assert_eq!(stripped, "some error message");
+    }
+
+    #[test]
+    fn test_strip_token_noop_when_empty() {
+        let body = "some error message";
+        let stripped = strip_token(body, "");
+        assert_eq!(stripped, "some error message");
+    }
+
+    #[test]
+    fn test_strip_token_multiple_occurrences() {
+        let body = "token abc and abc again";
+        let stripped = strip_token(body, "abc");
+        assert_eq!(stripped, "token [REDACTED] and [REDACTED] again");
+    }
+
+    #[test]
+    fn test_invalid_chunk_size_error_message() {
+        let err = UploadError::InvalidChunkSize(0);
+        assert!(err.to_string().contains("invalid chunk_size"));
+        assert!(err.to_string().contains("must be 1..="));
+
+        let err = UploadError::InvalidChunkSize(16 * 1024 * 1024);
+        assert!(err.to_string().contains("16777216"));
     }
 }

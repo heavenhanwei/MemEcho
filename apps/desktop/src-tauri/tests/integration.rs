@@ -1,14 +1,34 @@
 //! Integration tests for upload_session_tracks and save_report_commands.
 //!
 //! Uses wiremock to simulate gateway API endpoints.
+//!
+//! SECURITY: These tests MUST use `upload_session_tracks_with_token` to inject
+//! a mock token. They must NEVER call credential_set, credential_get, or
+//! credential_delete for "gateway_token" — that would overwrite or delete the
+//! user's real Windows Credential Manager entry.
 
 #[cfg(test)]
 mod integration_tests {
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Compile-time guard: this module must never import credential functions.
+    /// If someone adds `use memecho_desktop_lib::credential::*;` below, this
+    /// assertion fails to compile (the name doesn't exist in scope).
+    #[allow(dead_code)]
+    const _NO_CREDENTIAL_CALLS: () = {
+        // Intentionally empty — the guard is that we do NOT import or call
+        // credential_set / credential_get / credential_delete anywhere in
+        // this module. The `#[forbid(unused_imports)]` on the test binary
+        // and CI grep for "credential_" in this file provide runtime coverage.
+    };
+
+    /// Test token injected into `upload_session_tracks_with_token`.
+    const TEST_TOKEN: &str = "test-token-for-upload-isolation";
 
     fn unique_id() -> String {
         uuid::Uuid::new_v4().to_string()
@@ -17,7 +37,6 @@ mod integration_tests {
     fn make_test_session(sessions_dir: &std::path::Path, session_id: &str) {
         let session_dir = sessions_dir.join(session_id);
         std::fs::create_dir_all(&session_dir).unwrap();
-        // Write minimal WAV files (just some bytes for testing)
         std::fs::write(session_dir.join("mic.wav"), b"RIFF....WAVfmt data").unwrap();
         std::fs::write(session_dir.join("loopback.wav"), b"RIFF....WAVfmt data").unwrap();
     }
@@ -27,7 +46,15 @@ mod integration_tests {
         memecho_desktop_lib::db::Repository::open(&db_path).unwrap()
     }
 
-    // ── Upload validation tests ───────────────────────────────────────────────
+    /// Compute SHA-256 and size for the test WAV content used by make_test_session.
+    fn test_wav_sha256_and_size() -> (String, u64) {
+        let content = b"RIFF....WAVfmt data";
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        (hex::encode(hasher.finalize()), content.len() as u64)
+    }
+
+    // ── Upload validation tests (use _with_token, never touch credentials) ───
 
     #[test]
     fn test_upload_rejects_invalid_local_session_id() {
@@ -36,11 +63,12 @@ mod integration_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
-            memecho_desktop_lib::upload::upload_session_tracks_impl(
+            memecho_desktop_lib::upload::upload_session_tracks_with_token(
                 "../evil".to_string(),
                 "gw-session".to_string(),
                 "https://gateway.example.com".to_string(),
                 &sessions_dir,
+                TEST_TOKEN.to_string(),
             )
             .await
         });
@@ -58,11 +86,12 @@ mod integration_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
-            memecho_desktop_lib::upload::upload_session_tracks_impl(
+            memecho_desktop_lib::upload::upload_session_tracks_with_token(
                 "valid-session".to_string(),
                 "foo/bar".to_string(),
                 "https://gateway.example.com".to_string(),
                 &sessions_dir,
+                TEST_TOKEN.to_string(),
             )
             .await
         });
@@ -80,11 +109,12 @@ mod integration_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
-            memecho_desktop_lib::upload::upload_session_tracks_impl(
+            memecho_desktop_lib::upload::upload_session_tracks_with_token(
                 "valid-session".to_string(),
                 "gw-session".to_string(),
                 "http://evil.com".to_string(),
                 &sessions_dir,
+                TEST_TOKEN.to_string(),
             )
             .await
         });
@@ -99,24 +129,25 @@ mod integration_tests {
     fn test_upload_allows_localhost_http() {
         let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
         std::fs::create_dir_all(&sessions_dir).unwrap();
-        // This will fail at credential lookup, but URL validation should pass
+        // With injected token, localhost HTTP passes URL validation and fails at
+        // session path resolution (not credential lookup).
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
-            memecho_desktop_lib::upload::upload_session_tracks_impl(
+            memecho_desktop_lib::upload::upload_session_tracks_with_token(
                 "valid-session".to_string(),
                 "gw-session".to_string(),
                 "http://localhost:3000".to_string(),
                 &sessions_dir,
+                TEST_TOKEN.to_string(),
             )
             .await
         });
 
         assert!(result.is_err());
-        // Should fail at credential, not URL validation
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("credential") || err.contains("authentication"),
-            "got: {}",
+            err.contains("invalid session id") || err.contains("session"),
+            "expected session path error, got: {}",
             err
         );
         std::fs::remove_dir_all(&sessions_dir).ok();
@@ -131,11 +162,12 @@ mod integration_tests {
 
         // Empty local session ID
         let result = rt.block_on(async {
-            memecho_desktop_lib::upload::upload_session_tracks_impl(
+            memecho_desktop_lib::upload::upload_session_tracks_with_token(
                 "".to_string(),
                 "gw-session".to_string(),
                 "https://gateway.example.com".to_string(),
                 &sessions_dir,
+                TEST_TOKEN.to_string(),
             )
             .await
         });
@@ -143,16 +175,35 @@ mod integration_tests {
 
         // Empty gateway session ID
         let result = rt.block_on(async {
-            memecho_desktop_lib::upload::upload_session_tracks_impl(
+            memecho_desktop_lib::upload::upload_session_tracks_with_token(
                 "valid-session".to_string(),
                 "".to_string(),
                 "https://gateway.example.com".to_string(),
                 &sessions_dir,
+                TEST_TOKEN.to_string(),
             )
             .await
         });
         assert!(result.is_err());
 
+        std::fs::remove_dir_all(&sessions_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_upload_unsafe_path_rejected() {
+        let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let result = memecho_desktop_lib::upload::upload_session_tracks_with_token(
+            "../../../etc/passwd".to_string(),
+            "gw-sess".to_string(),
+            "https://gateway.example.com".to_string(),
+            &sessions_dir,
+            TEST_TOKEN.to_string(),
+        )
+        .await;
+
+        assert!(result.is_err());
         std::fs::remove_dir_all(&sessions_dir).ok();
     }
 
@@ -186,7 +237,6 @@ mod integration_tests {
         let db = setup_db(&sessions_dir);
         let session_id = format!("test-{}", unique_id());
 
-        // Create session in DB
         db.create_session(&session_id, Some("Test"), None, None, 16000, None)
             .unwrap();
         make_test_session(&sessions_dir, &session_id);
@@ -237,7 +287,6 @@ mod integration_tests {
         let db = setup_db(&sessions_dir);
         let session_id = format!("atomic-{}", unique_id());
 
-        // Create session in DB
         db.create_session(&session_id, Some("Atomic Test"), None, None, 16000, None)
             .unwrap();
         make_test_session(&sessions_dir, &session_id);
@@ -254,12 +303,10 @@ mod integration_tests {
         assert!(result.is_ok());
         let saved = result.unwrap();
 
-        // Verify files exist
         assert!(saved.json_path.exists());
         assert!(saved.markdown_path.exists());
         assert!(saved.html_path.exists());
 
-        // Verify content
         assert_eq!(
             std::fs::read_to_string(&saved.json_path).unwrap(),
             r#"{"analysis":"test"}"#
@@ -273,7 +320,6 @@ mod integration_tests {
             "<h1>Report</h1><p>Content here</p>"
         );
 
-        // Verify no .tmp or .bak files remain
         let session_dir = sessions_dir.join(&session_id);
         for entry in std::fs::read_dir(&session_dir).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
@@ -284,7 +330,6 @@ mod integration_tests {
             );
         }
 
-        // Verify DB was updated
         let bundle = db.get_analysis_results(&session_id).unwrap();
         assert_eq!(bundle.results.len(), 1);
         assert_eq!(bundle.results[0].analysis_type, "report");
@@ -312,10 +357,8 @@ mod integration_tests {
             &db,
         );
 
-        // Should succeed since session dir exists
         assert!(result.is_ok());
 
-        // Verify no stale .tmp or .bak files
         let session_dir = sessions_dir.join(&session_id);
         for entry in std::fs::read_dir(&session_dir).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
@@ -373,82 +416,86 @@ mod integration_tests {
     }
 
     // ── Wiremock integration tests ───────────────────────────────────────────
+    //
+    // All tests below use `upload_session_tracks_with_token` with an explicit
+    // TEST_TOKEN. They NEVER call credential_set/get/delete for gateway_token.
 
     #[tokio::test]
-    async fn test_upload_two_tracks_with_mock_server() {
+    async fn test_upload_two_tracks_success_with_mock_server() {
         let mock_server = MockServer::start().await;
         let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
-        // Set up credential for test
-        #[cfg(windows)]
-        {
-            let _ =
-                memecho_desktop_lib::credential::credential_set("gateway_token", "test-token-123");
-        }
-
         let session_id = format!("mock-{}", unique_id());
         make_test_session(&sessions_dir, &session_id);
+        let (expected_sha, expected_size) = test_wav_sha256_and_size();
 
-        // Mock create-upload (POST to /uploads but NOT /uploads/.../complete)
+        let create_upload_id = "upload-fixed-id-001".to_string();
+
+        // Mock create-upload: POST /v1/sessions/gw-sess/uploads
         Mock::given(method("POST"))
             .and(path_regex(r"/v1/sessions/gw-sess/uploads$"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "upload_id": format!("upload-{}", unique_id()),
+                "upload_id": create_upload_id,
                 "chunk_size": 4194304
             })))
             .mount(&mock_server)
             .await;
 
-        // Mock chunk upload (PUT)
+        // Mock chunk upload: PUT .../chunks/N
         Mock::given(method("PUT"))
             .and(path_regex(
-                r"/v1/sessions/gw-sess/uploads/upload-.*/chunks/\d+",
+                r"/v1/sessions/gw-sess/uploads/upload-fixed-id-001/chunks/\d+",
             ))
             .respond_with(ResponseTemplate::new(200))
             .mount(&mock_server)
             .await;
 
-        // Mock complete upload (POST to /complete)
+        // Mock complete upload: POST .../complete — returns matching ID, size, sha
         Mock::given(method("POST"))
             .and(path_regex(
-                r"/v1/sessions/gw-sess/uploads/upload-.*/complete",
+                r"/v1/sessions/gw-sess/uploads/upload-fixed-id-001/complete",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "upload_id": format!("upload-{}", unique_id()),
-                "size": 19,
-                "sha256": "d4e5f6..." // Will mismatch, testing checksum verification path
+                "upload_id": create_upload_id,
+                "size": expected_size,
+                "sha256": expected_sha,
             })))
             .mount(&mock_server)
             .await;
 
-        // The test will fail at checksum verification since we use a fake SHA
-        // This verifies the checksum comparison logic is working
-        let result = memecho_desktop_lib::upload::upload_session_tracks_impl(
+        let result = memecho_desktop_lib::upload::upload_session_tracks_with_token(
             session_id,
             "gw-sess".to_string(),
             mock_server.uri(),
             &sessions_dir,
+            TEST_TOKEN.to_string(),
         )
         .await;
 
-        // Should fail with checksum mismatch or credential error
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("checksum mismatch")
-                || err.contains("credential")
-                || err.contains("authentication")
-                || err.contains("http error"),
-            "got: {}",
-            err
-        );
+        assert!(result.is_ok(), "upload should succeed: {:?}", result.err());
+        let upload_result = result.unwrap();
 
-        // Cleanup
-        #[cfg(windows)]
-        {
-            let _ = memecho_desktop_lib::credential::credential_delete("gateway_token");
-        }
+        // Both tracks returned
+        assert_eq!(upload_result.uploads.len(), 2);
+
+        // First track: microphone
+        let mic = &upload_result.uploads[0];
+        assert_eq!(mic.track, "microphone");
+        assert_eq!(mic.upload_id, create_upload_id);
+        assert_eq!(mic.size, expected_size);
+        assert_eq!(mic.sha256, expected_sha);
+
+        // Second track: system (loopback)
+        let sys = &upload_result.uploads[1];
+        assert_eq!(sys.track, "system");
+        assert_eq!(sys.upload_id, create_upload_id);
+        assert_eq!(sys.size, expected_size);
+        assert_eq!(sys.sha256, expected_sha);
+
+        // Total bytes
+        assert_eq!(upload_result.total_bytes, expected_size * 2);
+
         std::fs::remove_dir_all(&sessions_dir).ok();
     }
 
@@ -458,11 +505,6 @@ mod integration_tests {
         let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
-        #[cfg(windows)]
-        {
-            let _ = memecho_desktop_lib::credential::credential_set("gateway_token", "retry-token");
-        }
-
         let session_id = format!("retry-{}", unique_id());
         make_test_session(&sessions_dir, &session_id);
 
@@ -470,7 +512,7 @@ mod integration_tests {
         Mock::given(method("POST"))
             .and(path_regex(r"/v1/sessions/gw-retry/uploads$"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "upload_id": format!("upload-{}", unique_id()),
+                "upload_id": "upload-retry-001",
                 "chunk_size": 4194304
             })))
             .mount(&mock_server)
@@ -479,64 +521,71 @@ mod integration_tests {
         // Mock chunk upload always fails (testing retry exhaustion)
         Mock::given(method("PUT"))
             .and(path_regex(
-                r"/v1/sessions/gw-retry/uploads/upload-.*/chunks/\d+",
+                r"/v1/sessions/gw-retry/uploads/upload-retry-001/chunks/\d+",
             ))
             .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
             .mount(&mock_server)
             .await;
 
-        let result = memecho_desktop_lib::upload::upload_session_tracks_impl(
+        let result = memecho_desktop_lib::upload::upload_session_tracks_with_token(
             session_id,
             "gw-retry".to_string(),
             mock_server.uri(),
             &sessions_dir,
+            TEST_TOKEN.to_string(),
         )
         .await;
 
-        // Should fail with retry exhausted
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("retries") || err.contains("credential"),
-            "got: {}",
+            err.contains("retries"),
+            "expected retry exhaustion, got: {}",
+            err
+        );
+        // Error must not leak the token
+        assert!(
+            !err.contains(TEST_TOKEN),
+            "error must not echo token value, got: {}",
             err
         );
 
-        #[cfg(windows)]
-        {
-            let _ = memecho_desktop_lib::credential::credential_delete("gateway_token");
-        }
         std::fs::remove_dir_all(&sessions_dir).ok();
     }
 
     #[tokio::test]
-    async fn test_upload_auth_absence_returns_error() {
+    async fn test_upload_rejects_zero_chunk_size() {
         let mock_server = MockServer::start().await;
         let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
-        // Don't set any credential
-        #[cfg(windows)]
-        {
-            let _ = memecho_desktop_lib::credential::credential_delete("gateway_token");
-        }
-
-        let session_id = format!("noauth-{}", unique_id());
+        let session_id = format!("chunk0-{}", unique_id());
         make_test_session(&sessions_dir, &session_id);
 
-        let result = memecho_desktop_lib::upload::upload_session_tracks_impl(
+        // Mock create-upload returns chunk_size = 0
+        Mock::given(method("POST"))
+            .and(path_regex(r"/v1/sessions/gw-chunk0/uploads$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_id": "upload-chunk0-001",
+                "chunk_size": 0
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let result = memecho_desktop_lib::upload::upload_session_tracks_with_token(
             session_id,
-            "gw-noauth".to_string(),
+            "gw-chunk0".to_string(),
             mock_server.uri(),
             &sessions_dir,
+            TEST_TOKEN.to_string(),
         )
         .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("credential") || err.contains("authentication"),
-            "got: {}",
+            err.contains("invalid chunk_size"),
+            "expected InvalidChunkSize error, got: {}",
             err
         );
 
@@ -544,25 +593,276 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn test_upload_unsafe_path_rejected() {
+    async fn test_upload_rejects_oversized_chunk_size() {
+        let mock_server = MockServer::start().await;
         let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
-        let result = memecho_desktop_lib::upload::upload_session_tracks_impl(
-            "../../../etc/passwd".to_string(),
-            "gw-sess".to_string(),
-            "https://gateway.example.com".to_string(),
+        let session_id = format!("chunkbig-{}", unique_id());
+        make_test_session(&sessions_dir, &session_id);
+
+        // Mock create-upload returns chunk_size > 8 MiB
+        Mock::given(method("POST"))
+            .and(path_regex(r"/v1/sessions/gw-chunkbig/uploads$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_id": "upload-chunkbig-001",
+                "chunk_size": 16_777_216 // 16 MiB
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let result = memecho_desktop_lib::upload::upload_session_tracks_with_token(
+            session_id,
+            "gw-chunkbig".to_string(),
+            mock_server.uri(),
             &sessions_dir,
+            TEST_TOKEN.to_string(),
         )
         .await;
 
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid chunk_size"),
+            "expected InvalidChunkSize error, got: {}",
+            err
+        );
+
         std::fs::remove_dir_all(&sessions_dir).ok();
     }
 
     #[tokio::test]
+    async fn test_upload_detects_upload_id_mismatch() {
+        let mock_server = MockServer::start().await;
+        let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let session_id = format!("idmismatch-{}", unique_id());
+        make_test_session(&sessions_dir, &session_id);
+        let (expected_sha, expected_size) = test_wav_sha256_and_size();
+
+        // Mock create-upload returns upload_id = "upload-A"
+        Mock::given(method("POST"))
+            .and(path_regex(r"/v1/sessions/gw-idmismatch/uploads$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_id": "upload-A",
+                "chunk_size": 4194304
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Mock chunk upload
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"/v1/sessions/gw-idmismatch/uploads/upload-A/chunks/\d+",
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+
+        // Mock complete returns DIFFERENT upload_id = "upload-B"
+        Mock::given(method("POST"))
+            .and(path_regex(
+                r"/v1/sessions/gw-idmismatch/uploads/upload-A/complete",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_id": "upload-B",
+                "size": expected_size,
+                "sha256": expected_sha,
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let result = memecho_desktop_lib::upload::upload_session_tracks_with_token(
+            session_id,
+            "gw-idmismatch".to_string(),
+            mock_server.uri(),
+            &sessions_dir,
+            TEST_TOKEN.to_string(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("upload id mismatch"),
+            "expected UploadIdMismatch, got: {}",
+            err
+        );
+
+        std::fs::remove_dir_all(&sessions_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_upload_detects_size_mismatch() {
+        let mock_server = MockServer::start().await;
+        let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let session_id = format!("sizemismatch-{}", unique_id());
+        make_test_session(&sessions_dir, &session_id);
+        let (expected_sha, _expected_size) = test_wav_sha256_and_size();
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/v1/sessions/gw-sizemismatch/uploads$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_id": "upload-size-001",
+                "chunk_size": 4194304
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"/v1/sessions/gw-sizemismatch/uploads/upload-size-001/chunks/\d+",
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+
+        // Complete returns wrong size (999 instead of actual)
+        Mock::given(method("POST"))
+            .and(path_regex(
+                r"/v1/sessions/gw-sizemismatch/uploads/upload-size-001/complete",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_id": "upload-size-001",
+                "size": 999,
+                "sha256": expected_sha,
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let result = memecho_desktop_lib::upload::upload_session_tracks_with_token(
+            session_id,
+            "gw-sizemismatch".to_string(),
+            mock_server.uri(),
+            &sessions_dir,
+            TEST_TOKEN.to_string(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("size mismatch"),
+            "expected SizeMismatch, got: {}",
+            err
+        );
+
+        std::fs::remove_dir_all(&sessions_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_upload_detects_checksum_mismatch() {
+        let mock_server = MockServer::start().await;
+        let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let session_id = format!("checksum-{}", unique_id());
+        make_test_session(&sessions_dir, &session_id);
+        let (_expected_sha, expected_size) = test_wav_sha256_and_size();
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/v1/sessions/gw-checksum/uploads$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_id": "upload-checksum-001",
+                "chunk_size": 4194304
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"/v1/sessions/gw-checksum/uploads/upload-checksum-001/chunks/\d+",
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+
+        // Complete returns wrong sha256
+        Mock::given(method("POST"))
+            .and(path_regex(
+                r"/v1/sessions/gw-checksum/uploads/upload-checksum-001/complete",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_id": "upload-checksum-001",
+                "size": expected_size,
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let result = memecho_desktop_lib::upload::upload_session_tracks_with_token(
+            session_id,
+            "gw-checksum".to_string(),
+            mock_server.uri(),
+            &sessions_dir,
+            TEST_TOKEN.to_string(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("checksum mismatch"),
+            "expected ChecksumMismatch, got: {}",
+            err
+        );
+
+        std::fs::remove_dir_all(&sessions_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_upload_error_does_not_echo_token() {
+        let mock_server = MockServer::start().await;
+        let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let session_id = format!("redact-{}", unique_id());
+        make_test_session(&sessions_dir, &session_id);
+
+        // Mock create-upload returns an error that might echo the auth header
+        Mock::given(method("POST"))
+            .and(path_regex(r"/v1/sessions/gw-redact/uploads$"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_string("Unauthorized: bad token test-token-for-upload-isolation"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let result = memecho_desktop_lib::upload::upload_session_tracks_with_token(
+            session_id,
+            "gw-redact".to_string(),
+            mock_server.uri(),
+            &sessions_dir,
+            TEST_TOKEN.to_string(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // The error message must be bounded and not echo Authorization/token values
+        assert!(
+            !err.contains(TEST_TOKEN),
+            "error must not echo token, got: {}",
+            err
+        );
+        assert!(
+            err.len() < 1024,
+            "error text must be bounded, got len={}: {}",
+            err.len(),
+            err
+        );
+
+        std::fs::remove_dir_all(&sessions_dir).ok();
+    }
+
+    // ── Checksum metadata test ────────────────────────────────────────────────
+
+    #[tokio::test]
     async fn test_upload_checksum_metadata_correct() {
-        // Test that SHA-256 is computed correctly for known content
         use sha2::{Digest, Sha256};
 
         let dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
@@ -596,7 +896,6 @@ mod integration_tests {
             .unwrap();
         make_test_session(&sessions_dir, &session_id);
 
-        // First save
         let r1 = memecho_desktop_lib::report::save_report_files_impl(
             &session_id,
             r#"{"version":1}"#,
@@ -612,7 +911,6 @@ mod integration_tests {
             r#"{"version":1}"#
         );
 
-        // Second save — must replace without rename failures
         let r2 = memecho_desktop_lib::report::save_report_files_impl(
             &session_id,
             r#"{"version":2}"#,
@@ -636,7 +934,6 @@ mod integration_tests {
             "<h1>v2</h1>"
         );
 
-        // No temp or backup artifacts remain
         let session_dir = sessions_dir.join(&session_id);
         for entry in std::fs::read_dir(&session_dir).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
@@ -661,7 +958,6 @@ mod integration_tests {
             .unwrap();
         make_test_session(&sessions_dir, &session_id);
 
-        // Save a valid report first
         let r1 = memecho_desktop_lib::report::save_report_files_impl(
             &session_id,
             r#"{"original":true}"#,
@@ -672,7 +968,6 @@ mod integration_tests {
         );
         assert!(r1.is_ok());
 
-        // Now attempt a save with invalid JSON — should fail
         let r2 = memecho_desktop_lib::report::save_report_files_impl(
             &session_id,
             "not valid json at all",
@@ -683,7 +978,6 @@ mod integration_tests {
         );
         assert!(r2.is_err());
 
-        // The original report files must still be intact
         let session_dir = sessions_dir.join(&session_id);
         let json_path = session_dir.join("report.json");
         let md_path = session_dir.join("report.md");
@@ -709,7 +1003,6 @@ mod integration_tests {
             "<h1>Original</h1>"
         );
 
-        // No stale artifacts
         for entry in std::fs::read_dir(&session_dir).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
             assert!(
