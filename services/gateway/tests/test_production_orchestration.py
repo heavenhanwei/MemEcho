@@ -61,7 +61,9 @@ async def test_orchestrator_uses_file_upload_instead_of_bytes(tmp_path):
         )
     )
     wav_path = tmp_path / session.id / "audio.wav"
-    sf.write(wav_path, np.zeros(1600, dtype=np.float32), 16000)
+    time = np.linspace(0, 2, 32000, endpoint=False)
+    signal = 0.5 * np.sin(2 * np.pi * 220 * time)
+    sf.write(wav_path, signal.astype(np.float32), 16000)
     upload = UploadRecord(
         "upl_stream", session.id, "import", "audio.wav", "audio/wav",
         wav_path.stat().st_size, "abc", wav_path.parent, completed_path=wav_path,
@@ -87,8 +89,19 @@ async def test_orchestrator_uses_file_upload_instead_of_bytes(tmp_path):
         async def delete(self, _key):
             return None
 
+    class CapturingProvider(MockProvider):
+        def __init__(self):
+            self.session_input = None
+            self.track_input = None
+
+        async def analyze(self, session, tracks, request):
+            self.session_input = session
+            self.track_input = tracks
+            return await super().analyze(session, tracks, request)
+
     oss = FileOnlyOSS()
-    orchestrator = Orchestrator(store, MockProvider(), oss)
+    provider = CapturingProvider()
+    orchestrator = Orchestrator(store, provider, oss)
     job = await store.create_job(session.id, "req_stream")
     await orchestrator.run(job.id, session.id, {"request_id": "req_stream"})
 
@@ -96,6 +109,14 @@ async def test_orchestrator_uses_file_upload_instead_of_bytes(tmp_path):
         (f"memecho-test/{session.id}/upl_stream/audio.wav", wav_path, "audio/wav")
     ]
     assert store.jobs[job.id].status.value == "complete"
+    assert provider.track_input == ["import"]
+    weights = provider.session_input["observations"]["evidence_weights"]
+    assert weights["quality_tier"] == "sufficient"
+    assert provider.session_input["observations"]["acoustic_metrics"][0]["f0_median_hz"]
+    assert all(
+        point["linguistic_weight"] == 0.65 and point["acoustic_weight"] == 0.35
+        for point in session.result["vad_series"]
+    )
 
 
 async def test_fun_asr_and_emotion_start_concurrently(tmp_path):
@@ -122,3 +143,29 @@ async def test_fun_asr_and_emotion_start_concurrently(tmp_path):
     result = await orchestrator._collect_remote_observations("https://example.invalid/audio")
     assert started == {"fun_asr", "emotion"}
     assert result["errors"] == []
+
+
+async def test_remote_model_failure_is_retained_as_degradation(tmp_path):
+    class PartialDashScope:
+        async def submit_fun_asr(self, _url):
+            raise TimeoutError("transient upstream timeout")
+
+        async def submit_emotion(self, _url):
+            return {
+                "output": {
+                    "results": [
+                        {"start_ms": 0, "end_ms": 1000, "emotion": "neutral"}
+                    ]
+                }
+            }
+
+    orchestrator = Orchestrator(
+        MemoryStore(tmp_path), object(), dashscope_client=PartialDashScope()
+    )
+    result = await orchestrator._collect_remote_observations(
+        "https://example.invalid/audio"
+    )
+
+    assert result["diarization"] == []
+    assert result["emotions"][0]["emotion"] == "neutral"
+    assert result["errors"] == [{"source": "fun_asr", "error_code": "TimeoutError"}]

@@ -9,7 +9,7 @@ from .alignment import align_intervals
 from .contracts import validate_result
 from .models import JobStatus
 from .providers.oss import make_oss_key
-from .quality import compute_quality_metrics
+from .quality import compute_quality_metrics, conservative_evidence_weights
 from .rendering import render_html, render_markdown
 from .store import MemoryStore
 
@@ -101,7 +101,10 @@ class Orchestrator:
                 observations = await asyncio.gather(
                     *(self._collect_remote_observations(item[2]) for item in remote_tracks)
                 )
-                for observation in observations:
+                observations_by_upload_id: dict[str, dict[str, Any]] = {}
+                for remote_track, observation in zip(remote_tracks, observations, strict=True):
+                    upload = remote_track[0]
+                    observations_by_upload_id[upload.id] = observation
                     diarization.extend(observation["diarization"])
                     emotions.extend(observation["emotions"])
                     transcription_segments.extend(observation["transcript"])
@@ -118,15 +121,28 @@ class Orchestrator:
                 for upload in completed_uploads:
                     path = Path(upload.completed_path)
                     if path.suffix.lower() == ".wav":
-                        metrics = compute_quality_metrics(path)
+                        observation = observations_by_upload_id.get(upload.id)
+                        metrics = compute_quality_metrics(
+                            path,
+                            transcript_segments=(
+                                observation["transcript"] if observation is not None else None
+                            ),
+                            speaker_segments=(
+                                observation["diarization"] if observation is not None else None
+                            ),
+                        )
                         metrics["track"] = upload.track
                         quality_metrics.append(metrics)
+                evidence_weights = conservative_evidence_weights(quality_metrics)
+                track_labels = [upload.track for upload in completed_uploads]
 
                 session.job_intermediates[job_id] = {
                     "aligned": aligned,
                     "quality_metrics": quality_metrics,
                     "tracks": tracks,
+                    "track_labels": track_labels,
                     "model_errors": model_errors,
+                    "evidence_weights": evidence_weights,
                 }
             else:
                 intermediate = session.job_intermediates.get(job_id)
@@ -135,7 +151,9 @@ class Orchestrator:
                 aligned = intermediate.get("aligned", [])
                 quality_metrics = intermediate.get("quality_metrics", [])
                 tracks = intermediate.get("tracks", [])
+                track_labels = intermediate.get("track_labels", [Path(item).name for item in tracks])
                 model_errors = intermediate.get("model_errors", [])
+                evidence_weights = intermediate.get("evidence_weights") or conservative_evidence_weights(quality_metrics)
 
             # Check participant resolution before analysis
             if not session.participant_resolution and aligned:
@@ -152,15 +170,30 @@ class Orchestrator:
                     "context": session.create.context,
                     "occurred_at": session.create.occurred_at.isoformat(),
                     "participant_resolution": session.participant_resolution,
+                    "observations": {
+                        "aligned_segments": aligned,
+                        "acoustic_metrics": quality_metrics,
+                        "model_errors": model_errors,
+                        "evidence_weights": evidence_weights,
+                    },
                 },
-                tracks=tracks,
+                tracks=track_labels,
                 request=request,
             )
+
+            if result.get("analysis_mode") == "text_only":
+                evidence_weights = conservative_evidence_weights([])
+            for point in result.get("vad_series", []):
+                point["linguistic_weight"] = evidence_weights["linguistic_weight"]
+                point["acoustic_weight"] = evidence_weights["acoustic_weight"]
 
             if quality_metrics:
                 result["_quality_metrics"] = quality_metrics
             if aligned:
                 result["_aligned_segments"] = aligned
+            if model_errors:
+                result["_model_errors"] = model_errors
+            result["_evidence_weights"] = evidence_weights
 
             errors = validate_result(result)
             if errors:
