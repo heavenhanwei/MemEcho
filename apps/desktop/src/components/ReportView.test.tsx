@@ -144,6 +144,22 @@ describe("ReportView content and VAD accessibility", () => {
 });
 
 describe("ReportView selected evidence chat context", () => {
+  it("explains when evidence playback lacks a track", () => {
+    render(<ReportView result={result} onBack={vi.fn()} localSessionId="local-1" />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: /回听证据/ })[0]);
+
+    expect(screen.getByRole("status")).toHaveTextContent("缺少音轨信息");
+  });
+
+  it("does not offer playback for imported media", () => {
+    render(<ReportView result={result} onBack={vi.fn()} sourceMode="import" />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: /回听证据/ })[0]);
+
+    expect(screen.getByRole("status")).toHaveTextContent("导入 MP3/M4A/MP4");
+  });
+
   it("sends an explicit empty evidence list when the user selects none", async () => {
     vi.mocked(gateway.chat).mockResolvedValue(undefined);
     render(<ReportView result={result} onBack={vi.fn()} />);

@@ -1094,7 +1094,11 @@ export function App() {
         {page === "settings" && <SettingsPage />}
         {page === "report" &&
           (result ? (
-            <ReportView result={result} onBack={() => setPage("echoes")} />
+            <ReportView
+              result={result}
+              localSessionId={localSessionId.current}
+              onBack={() => setPage("echoes")}
+            />
           ) : (
             <EchoesPage />
           ))}

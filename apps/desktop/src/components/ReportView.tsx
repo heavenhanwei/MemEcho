@@ -1,7 +1,8 @@
 import type { AnalysisResult } from "@memecho/contracts";
 import { ArrowLeft, CheckCircle2, MessageCircle, Sparkles } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { gateway } from "../lib/api";
+import { bridge, type EvidenceTrack } from "../lib/tauri";
 
 type VadMetric = "v" | "a" | "d";
 
@@ -119,9 +120,13 @@ function AnalysisList({ title, items }: { title: string; items: string[] }) {
 export function ReportView({
   result,
   onBack,
+  localSessionId = null,
+  sourceMode = "recording",
 }: {
   result: AnalysisResult;
   onBack: () => void;
+  localSessionId?: string | null;
+  sourceMode?: "recording" | "import";
 }) {
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
@@ -129,6 +134,47 @@ export function ReportView({
   const [selectedEvidenceIds, setSelectedEvidenceIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [playingEvidenceId, setPlayingEvidenceId] = useState<string | null>(null);
+  const [clipUrl, setClipUrl] = useState<string | null>(null);
+  const [clipStatus, setClipStatus] = useState<string>("");
+  useEffect(() => {
+    return () => {
+      if (clipUrl) URL.revokeObjectURL(clipUrl);
+    };
+  }, [clipUrl]);
+  const playEvidence = async (evidence: (typeof result.evidence)[number]) => {
+    if (sourceMode === "import") {
+      setClipStatus("导入 MP3/M4A/MP4 暂不提供证据回听。 ");
+      return;
+    }
+    const track = (evidence as typeof evidence & { track?: EvidenceTrack }).track;
+    if (!track) {
+      setClipStatus("此证据缺少音轨信息，无法安全回听。 ");
+      return;
+    }
+    if (!localSessionId) {
+      setClipStatus("当前报告没有本地录音会话，无法回听。 ");
+      return;
+    }
+    setPlayingEvidenceId(evidence.id);
+    setClipStatus("正在读取证据片段…");
+    try {
+      const clip = await bridge.readEvidenceClip(
+        localSessionId,
+        track,
+        evidence.start_ms,
+        evidence.end_ms,
+      );
+      const binary = Uint8Array.from(atob(clip.data_base64), (char) => char.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([binary], { type: clip.mime_type }));
+      setClipUrl(url);
+      setClipStatus("");
+    } catch {
+      setClipStatus("证据片段读取失败，请稍后重试。 ");
+    } finally {
+      setPlayingEvidenceId(null);
+    }
+  };
   const participantNames = new Map(
     result.participants.map((participant) => [participant.id, participant.name]),
   );
@@ -310,11 +356,27 @@ export function ReportView({
                   <div>
                     <b>{evidence.segment_id}</b>
                     <p>{evidence.excerpt}</p>
+                    <button
+                      type="button"
+                      className="text-btn evidence-play"
+                      onClick={() => void playEvidence(evidence)}
+                      disabled={playingEvidenceId === evidence.id}
+                    >
+                      {playingEvidenceId === evidence.id ? "读取中…" : "▶ 回听证据"}
+                    </button>
                   </div>
                 </label>
               );
             })}
           </div>
+          {clipUrl && (
+            <audio controls autoPlay src={clipUrl} aria-label="证据片段播放器" />
+          )}
+          {clipStatus && (
+            <p className="evidence-context-note" role="status">
+              {clipStatus}
+            </p>
+          )}
           {result.uncertainties.map((item) => (
             <p className="uncertainty" key={item}>
               {item}
