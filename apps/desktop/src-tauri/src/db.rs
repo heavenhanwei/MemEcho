@@ -1144,4 +1144,318 @@ mod tests {
         );
         cleanup(&dir);
     }
+
+    // ── Edge-case: combined cascade cleans all child types at once ─────────
+
+    #[test]
+    fn test_combined_cascade_deletes_all_child_types() {
+        let (repo, dir) = temp_repo();
+        repo.create_session("combo", None, None, None, 16000, None)
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Participant
+        repo.add_participant("combo", Some("Speaker"), Some("host"))
+            .unwrap();
+
+        // Transcript segment
+        repo.save_transcript_segments(&[TranscriptSegment {
+            id: "seg_combo".into(),
+            session_id: "combo".into(),
+            speaker_id: None,
+            start_ms: 0,
+            end_ms: 1000,
+            text: "hello".into(),
+            confidence: Some(0.9),
+            created_at: now.clone(),
+        }])
+        .unwrap();
+
+        // Analysis + memory candidate
+        repo.save_analysis_results(
+            "combo",
+            &[AnalysisResult {
+                id: "ar_combo".into(),
+                session_id: "combo".into(),
+                analysis_type: "summary".into(),
+                content_json: "{}".into(),
+                created_at: now.clone(),
+            }],
+            &[MemoryCandidate {
+                id: "mc_combo".into(),
+                session_id: "combo".into(),
+                segment_id: Some("seg_combo".into()),
+                content: "insight".into(),
+                score: Some(0.7),
+                confirmed: false,
+                created_at: now.clone(),
+            }],
+        )
+        .unwrap();
+
+        // Source relation
+        repo.create_session("combo_peer", None, None, None, 16000, None)
+            .unwrap();
+        repo.add_source_relation("combo", "combo_peer", "derived", None)
+            .unwrap();
+
+        // Verify all populated
+        assert_eq!(repo.list_participants("combo").unwrap().len(), 1);
+        assert_eq!(repo.get_transcript_segments("combo").unwrap().len(), 1);
+        assert_eq!(
+            repo.get_analysis_results("combo")
+                .unwrap()
+                .memory_candidates
+                .len(),
+            1
+        );
+        assert_eq!(repo.list_source_relations("combo").unwrap().len(), 1);
+
+        // Delete
+        repo.delete_session("combo").unwrap();
+
+        // All child data gone
+        assert_eq!(repo.list_participants("combo").unwrap().len(), 0);
+        assert_eq!(repo.get_transcript_segments("combo").unwrap().len(), 0);
+        let bundle = repo.get_analysis_results("combo").unwrap();
+        assert_eq!(bundle.results.len(), 0);
+        assert_eq!(bundle.memory_candidates.len(), 0);
+        assert_eq!(repo.list_source_relations("combo_peer").unwrap().len(), 0);
+        cleanup(&dir);
+    }
+
+    // ── Edge-case: get_session after delete returns SessionNotFound ────────
+
+    #[test]
+    fn test_get_session_after_delete_returns_not_found() {
+        let (repo, dir) = temp_repo();
+        repo.create_session("gone", None, None, None, 16000, None)
+            .unwrap();
+        repo.delete_session("gone").unwrap();
+        let err = repo.get_session("gone").unwrap_err();
+        assert!(matches!(err, DbError::SessionNotFound(ref id) if id == "gone"));
+        cleanup(&dir);
+    }
+
+    // ── Edge-case: idempotent delete returns SessionNotFound ──────────────
+
+    #[test]
+    fn test_double_delete_returns_not_found() {
+        let (repo, dir) = temp_repo();
+        repo.create_session("once", None, None, None, 16000, None)
+            .unwrap();
+        repo.delete_session("once").unwrap();
+        let err = repo.delete_session("once").unwrap_err();
+        assert!(matches!(err, DbError::SessionNotFound(_)));
+        cleanup(&dir);
+    }
+
+    // ── Edge-case: deleting one session leaves siblings untouched ──────────
+
+    #[test]
+    fn test_delete_does_not_affect_sibling_sessions() {
+        let (repo, dir) = temp_repo();
+        repo.create_session("sib_a", Some("A"), None, None, 16000, None)
+            .unwrap();
+        repo.create_session("sib_b", Some("B"), None, None, 16000, None)
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Both have analysis
+        for sid in &["sib_a", "sib_b"] {
+            repo.save_analysis_results(
+                sid,
+                &[AnalysisResult {
+                    id: format!("ar_{sid}"),
+                    session_id: sid.to_string(),
+                    analysis_type: "summary".into(),
+                    content_json: "{}".into(),
+                    created_at: now.clone(),
+                }],
+                &[],
+            )
+            .unwrap();
+        }
+
+        // Also create a relation between them
+        repo.add_source_relation("sib_a", "sib_b", "related", None)
+            .unwrap();
+
+        repo.delete_session("sib_a").unwrap();
+
+        // sib_b's own data untouched
+        let b = repo.get_session("sib_b").unwrap();
+        assert_eq!(b.title.as_deref(), Some("B"));
+        let b_bundle = repo.get_analysis_results("sib_b").unwrap();
+        assert_eq!(b_bundle.results.len(), 1);
+
+        // Relations involving sib_a are gone (cascaded)
+        assert_eq!(repo.list_source_relations("sib_b").unwrap().len(), 0);
+
+        // Session count reduced
+        assert_eq!(repo.list_sessions(None).unwrap().len(), 1);
+        cleanup(&dir);
+    }
+
+    // ── Edge-case: self-referential source_relation ────────────────────────
+
+    #[test]
+    fn test_self_referential_source_relation_cascades() {
+        let (repo, dir) = temp_repo();
+        repo.create_session("self_ref", None, None, None, 16000, None)
+            .unwrap();
+        repo.add_source_relation("self_ref", "self_ref", "self_analysis", None)
+            .unwrap();
+        assert_eq!(repo.list_source_relations("self_ref").unwrap().len(), 1);
+        repo.delete_session("self_ref").unwrap();
+        assert_eq!(repo.list_source_relations("self_ref").unwrap().len(), 0);
+        cleanup(&dir);
+    }
+
+    // ── Edge-case: read-after-delete returns empty, not error ──────────────
+
+    #[test]
+    fn test_read_derived_data_after_delete_returns_empty() {
+        let (repo, dir) = temp_repo();
+        repo.create_session("read_del", None, None, None, 16000, None)
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        repo.add_participant("read_del", Some("P"), None).unwrap();
+        repo.save_transcript_segments(&[TranscriptSegment {
+            id: "seg_rd".into(),
+            session_id: "read_del".into(),
+            speaker_id: None,
+            start_ms: 0,
+            end_ms: 1000,
+            text: "t".into(),
+            confidence: None,
+            created_at: now.clone(),
+        }])
+        .unwrap();
+        repo.save_analysis_results(
+            "read_del",
+            &[AnalysisResult {
+                id: "ar_rd".into(),
+                session_id: "read_del".into(),
+                analysis_type: "type".into(),
+                content_json: "{}".into(),
+                created_at: now,
+            }],
+            &[],
+        )
+        .unwrap();
+
+        repo.delete_session("read_del").unwrap();
+
+        // All reads return empty vecs/bundles, not errors
+        assert!(repo.list_participants("read_del").unwrap().is_empty());
+        assert!(repo.get_transcript_segments("read_del").unwrap().is_empty());
+        let bundle = repo.get_analysis_results("read_del").unwrap();
+        assert!(bundle.results.is_empty());
+        assert!(bundle.memory_candidates.is_empty());
+        assert!(repo.list_source_relations("read_del").unwrap().is_empty());
+        cleanup(&dir);
+    }
+
+    // ── Edge-case: cascade_delete_session path validation on non-existent ──
+
+    #[test]
+    fn test_delete_nonexistent_session_returns_not_found() {
+        let (repo, dir) = temp_repo();
+        // delete_session (the inner function behind cascade) returns
+        // SessionNotFound when the session does not exist.
+        let err = repo.delete_session("ghost-123").unwrap_err();
+        assert!(matches!(err, DbError::SessionNotFound(ref id) if id == "ghost-123"));
+        cleanup(&dir);
+    }
+
+    // ── Edge-case: empty session (no children) deletes cleanly ─────────────
+
+    #[test]
+    fn test_delete_empty_session_with_no_children() {
+        let (repo, dir) = temp_repo();
+        repo.create_session("empty", None, None, None, 16000, None)
+            .unwrap();
+        let deleted = repo.delete_session("empty").unwrap();
+        assert_eq!(deleted.id, "empty");
+        assert!(repo.list_participants("empty").unwrap().is_empty());
+        assert!(repo
+            .get_analysis_results("empty")
+            .unwrap()
+            .results
+            .is_empty());
+        cleanup(&dir);
+    }
+
+    // ── Edge-case: many-to-many source relations survive partial delete ────
+
+    #[test]
+    fn test_partial_source_relation_cascade_preserves_survivor_links() {
+        let (repo, dir) = temp_repo();
+        repo.create_session("pA", None, None, None, 16000, None)
+            .unwrap();
+        repo.create_session("pB", None, None, None, 16000, None)
+            .unwrap();
+        repo.create_session("pC", None, None, None, 16000, None)
+            .unwrap();
+
+        // A→B, A→C, B→C
+        repo.add_source_relation("pA", "pB", "link", None).unwrap();
+        repo.add_source_relation("pA", "pC", "link", None).unwrap();
+        repo.add_source_relation("pB", "pC", "link", None).unwrap();
+
+        // Delete A — A→B and A→C cascade; B→C survives
+        repo.delete_session("pA").unwrap();
+        assert_eq!(repo.list_source_relations("pB").unwrap().len(), 1);
+        assert_eq!(repo.list_source_relations("pC").unwrap().len(), 1);
+        let b_rels = repo.list_source_relations("pB").unwrap();
+        assert_eq!(b_rels[0].source_session_id, "pB");
+        assert_eq!(b_rels[0].target_session_id, "pC");
+        cleanup(&dir);
+    }
+
+    // ── Edge-case: restart after delete — cascade persists across reopen ───
+
+    #[test]
+    fn test_cascade_persists_across_restart() {
+        let dir = std::env::temp_dir().join(format!("memecho_rst_del_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("restart.db");
+        {
+            let repo = Repository::open(&db_path).unwrap();
+            repo.create_session("rst_keep", Some("Keep"), None, None, 16000, None)
+                .unwrap();
+            repo.create_session("rst_kill", Some("Kill"), None, None, 16000, None)
+                .unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            repo.save_analysis_results(
+                "rst_kill",
+                &[AnalysisResult {
+                    id: "ar_kill".into(),
+                    session_id: "rst_kill".into(),
+                    analysis_type: "t".into(),
+                    content_json: "{}".into(),
+                    created_at: now,
+                }],
+                &[],
+            )
+            .unwrap();
+            repo.delete_session("rst_kill").unwrap();
+        }
+        // Reopen — deletion persisted
+        {
+            let repo = Repository::open(&db_path).unwrap();
+            assert_eq!(repo.list_sessions(None).unwrap().len(), 1);
+            assert!(matches!(
+                repo.get_session("rst_kill"),
+                Err(DbError::SessionNotFound(_))
+            ));
+            assert_eq!(
+                repo.get_analysis_results("rst_kill").unwrap().results.len(),
+                0
+            );
+            repo.get_session("rst_keep").unwrap();
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
