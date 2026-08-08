@@ -118,6 +118,7 @@ beforeEach(() => {
     caption: "",
     sessionId: null,
     requestId: null,
+    sourceMode: "recording",
     jobId: null,
     jobStatus: null,
     progress: 0,
@@ -336,5 +337,142 @@ describe("App (live resilience and Tauri desktop)", () => {
     fireEvent.click(screen.getByRole("button", { name: "关系" }));
     expect((await screen.findAllByText("只显示已确认内容")).length).toBeGreaterThan(0);
     expect(screen.queryByText("不应显示草稿")).not.toBeInTheDocument();
+  });
+});
+
+function localSessionFixture(id: string, sourceMode: "recording" | "import", title: string) {
+  return {
+    id,
+    title,
+    status: "completed",
+    mic_path: null,
+    loopback_path: null,
+    sample_rate: 0,
+    started_at: "2026-01-01T00:00:00Z",
+    ended_at: "2026-01-01T00:01:00Z",
+    duration_secs: 60,
+    recovery_status: "finalized",
+    error_code: null,
+    source_mode: sourceMode,
+    source_path: null,
+    source_name: null,
+    source_mime_type: null,
+    source_size_bytes: null,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:01:00Z",
+  };
+}
+
+const savedReportFixture = {
+  schema_version: "1.1",
+  request_id: "req-saved",
+  analysis_mode: "connected_full",
+  scope: { quality: 0.8 },
+  minutes: {
+    summary: "已保存的历史报告。",
+    focus: [],
+    consensus: [],
+    disagreements: [],
+    explicit_actions: [],
+    recommendations: [],
+  },
+  content_analysis: [],
+  participants: [{ id: "speaker_1", name: "我", is_self: true }],
+  vad_series: [],
+  interaction_events: [],
+  self_echo: { participant_id: "speaker_1", identity_basis: "user_confirmed", effects: [], alternatives: [] },
+  coaching: { enabled: false, status: "not_requested", scenes: [] },
+  insights: [],
+  evidence: [
+    {
+      id: "ev_1",
+      source_type: "transcript",
+      speaker_id: "speaker_1",
+      start_ms: 1000,
+      end_ms: 3000,
+      segment_id: "seg_1",
+      excerpt: "历史证据片段。",
+      quality_flags: [],
+      track: "mic",
+    },
+  ],
+  uncertainties: [],
+  provenance: { skill_version: "1.0.2", service_version: "test", model_manifest: [] },
+  memory: { written: false, consent_basis: null },
+};
+
+describe("App historical report source mode", () => {
+  function installHistorySessions() {
+    const calls: Array<{ cmd: string; args: unknown }> = [];
+    mockIPC((cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "list_audio_devices") return [];
+      if (cmd === "list_local_sessions") {
+        return [
+          localSessionFixture("import-1", "import", "导入的会议"),
+          localSessionFixture("record-1", "recording", "录音的会议"),
+        ];
+      }
+      if (cmd === "get_analysis_results") {
+        return {
+          results: [
+            {
+              id: "result-1",
+              session_id: "any",
+              analysis_type: "report",
+              content_json: JSON.stringify(savedReportFixture),
+              created_at: "2026-01-01T00:02:00Z",
+            },
+          ],
+          memory_candidates: [],
+        };
+      }
+      if (cmd === "read_evidence_clip") {
+        return {
+          mime_type: "audio/wav",
+          data_base64: "UklGRg==",
+          duration_ms: 2000,
+          start_ms: 1000,
+          end_ms: 3000,
+          track: "mic",
+        };
+      }
+      return null;
+    });
+    return calls;
+  }
+
+  it("shows honest unsupported message for imported history sessions without calling the WAV bridge", async () => {
+    const calls = installHistorySessions();
+    URL.createObjectURL = vi.fn(() => "blob:evidence");
+    URL.revokeObjectURL = vi.fn();
+
+    render(<App />);
+    fireEvent.click(screen.getByText("回声"));
+    expect(await screen.findByText("导入的会议")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByText("打开报告")[0]);
+    expect(await screen.findByText("这次对话，发生了什么？")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /回听证据/ }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("导入会话暂不支持证据回听");
+    expect(calls.some((call) => call.cmd === "read_evidence_clip")).toBe(false);
+  });
+
+  it("keeps evidence playback for recording history sessions", async () => {
+    const calls = installHistorySessions();
+    URL.createObjectURL = vi.fn(() => "blob:evidence");
+    URL.revokeObjectURL = vi.fn();
+
+    render(<App />);
+    fireEvent.click(screen.getByText("回声"));
+    expect(await screen.findByText("录音的会议")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByText("打开报告")[1]);
+    expect(await screen.findByText("这次对话，发生了什么？")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /回听证据/ }));
+
+    expect(await screen.findByLabelText("证据片段播放器")).toBeInTheDocument();
+    expect(calls.some((call) => call.cmd === "read_evidence_clip")).toBe(true);
   });
 });

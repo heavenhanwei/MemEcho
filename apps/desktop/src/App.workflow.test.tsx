@@ -165,6 +165,7 @@ beforeEach(() => {
     caption: "",
     sessionId: null,
     requestId: null,
+    sourceMode: "recording",
     jobId: null,
     jobStatus: null,
     progress: 0,

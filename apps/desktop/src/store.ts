@@ -2,6 +2,7 @@ import type { AnalysisResult, JobStatus, SessionSummary } from "@memecho/contrac
 import { create } from "zustand";
 
 export type Page = "now" | "echoes" | "report" | "relations" | "settings";
+export type SourceMode = "recording" | "import";
 export type SoulState =
   | "idle"
   | "recording"
@@ -41,6 +42,7 @@ interface AppState {
   caption: string;
   sessionId: string | null;
   localSessionId: string | null;
+  sourceMode: SourceMode;
   requestId: string | null;
   jobId: string | null;
   jobStatus: JobStatus | null;
@@ -62,6 +64,7 @@ export const useAppStore = create<AppState>((set) => ({
   caption: "",
   sessionId: null,
   localSessionId: null,
+  sourceMode: "recording",
   requestId: null,
   jobId: null,
   jobStatus: null,
@@ -84,6 +87,7 @@ export const useAppStore = create<AppState>((set) => ({
       caption: "",
       sessionId: null,
       localSessionId: null,
+      sourceMode: "recording",
       requestId: null,
       jobId: null,
       jobStatus: null,

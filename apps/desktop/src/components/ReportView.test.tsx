@@ -4,6 +4,7 @@ import type { AnalysisResult } from "@memecho/contracts";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { gateway } from "../lib/api";
+import { bridge } from "../lib/tauri";
 import { ReportView } from "./ReportView";
 
 vi.mock("../lib/api", () => ({
@@ -153,11 +154,15 @@ describe("ReportView selected evidence chat context", () => {
   });
 
   it("does not offer playback for imported media", () => {
-    render(<ReportView result={result} onBack={vi.fn()} sourceMode="import" />);
+    const readClip = vi.spyOn(bridge, "readEvidenceClip");
+    render(
+      <ReportView result={result} onBack={vi.fn()} localSessionId="local-1" sourceMode="import" />,
+    );
 
     fireEvent.click(screen.getAllByRole("button", { name: /回听证据/ })[0]);
 
-    expect(screen.getByRole("status")).toHaveTextContent("导入 MP3/M4A/MP4");
+    expect(screen.getByRole("status")).toHaveTextContent("导入会话暂不支持证据回听");
+    expect(readClip).not.toHaveBeenCalled();
   });
 
   it("sends an explicit empty evidence list when the user selects none", async () => {

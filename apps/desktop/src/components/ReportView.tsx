@@ -144,7 +144,7 @@ export function ReportView({
   }, [clipUrl]);
   const playEvidence = async (evidence: (typeof result.evidence)[number]) => {
     if (sourceMode === "import") {
-      setClipStatus("导入 MP3/M4A/MP4 暂不提供证据回听。 ");
+      setClipStatus("导入会话暂不支持证据回听。");
       return;
     }
     const track = (evidence as typeof evidence & { track?: EvidenceTrack }).track;

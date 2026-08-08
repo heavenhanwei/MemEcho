@@ -348,6 +348,7 @@ function NowPage() {
       state.patch({
         sessionId: session.id,
         localSessionId: null,
+        sourceMode: "recording",
         requestId: session.request_id,
         soulState: "recording",
         elapsed: 0,
@@ -575,6 +576,7 @@ function NowPage() {
       state.patch({
         sessionId: session.id,
         localSessionId: context.localSessionId,
+        sourceMode: "import",
         requestId: session.request_id,
         soulState: "processing",
         progress: 4,
@@ -1070,7 +1072,13 @@ function HistoricalEchoesPage() {
       setError("This session has no saved report yet.");
       return;
     }
-    patchStore({ result: saved as never, localSessionId: sessionId, page: "report" });
+    const session = sessions.find((item) => item.id === sessionId);
+    patchStore({
+      result: saved as never,
+      localSessionId: sessionId,
+      sourceMode: session?.source_mode === "import" ? "import" : "recording",
+      page: "report",
+    });
   }
 
   if (!isTauri) {
@@ -1252,7 +1260,15 @@ function RelationsPage() {
           return;
         }
         const parsed = JSON.parse(report.content_json);
-        patch({ result: parsed, localSessionId: sessionId, page: "report" });
+        const summary = useAppStore
+          .getState()
+          .relations.sessions.find((item) => item.id === sessionId);
+        patch({
+          result: parsed,
+          localSessionId: sessionId,
+          sourceMode: summary?.context === "import" ? "import" : "recording",
+          page: "report",
+        });
         setPage("report");
       } catch (cause) {
         setError(describeError(cause, "无法打开来源报告"));
@@ -1306,7 +1322,7 @@ function SettingsPage() {
 }
 
 export function App() {
-  const { page, result, setPage } = useAppStore();
+  const { page, result, sourceMode, setPage } = useAppStore();
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -1342,6 +1358,7 @@ export function App() {
             <ReportView
               result={result}
               localSessionId={useAppStore.getState().localSessionId}
+              sourceMode={sourceMode}
               onBack={() => setPage("echoes")}
             />
           ) : (
