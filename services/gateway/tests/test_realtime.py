@@ -5,12 +5,15 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from websockets.exceptions import ConnectionClosed
 
 from memecho_gateway import main
 from memecho_gateway.config import Settings, get_settings
 from memecho_gateway.realtime import (
     BailianRealtimeClient,
     RealtimeConfigurationError,
+    RealtimeUpstreamDisconnected,
+    _retryable_provider_error,
     build_realtime_url,
 )
 
@@ -24,10 +27,12 @@ class FakeUpstreamSocket:
     async def send(self, message: str) -> None:
         self.sent.append(json.loads(message))
 
-    async def recv(self) -> str:
+    async def recv(self) -> str | bytes:
         item = await self.incoming.get()
         if isinstance(item, Exception):
             raise item
+        if isinstance(item, bytes):
+            return item
         return str(item)
 
     async def close(self) -> None:
@@ -260,3 +265,306 @@ def test_live_endpoint_forwards_desktop_pcm_and_cleans_up(
     upstream = FakeRealtimeClient.instances[-1]
     assert upstream.audio == [b"\x00\x01" * 1600]
     assert upstream.closed is True
+
+
+# ---------------------------------------------------------------------------
+# Edge-case / unit tests for realtime.py internals
+# ---------------------------------------------------------------------------
+
+
+class TestRetryableProviderError:
+    def test_transient_codes_are_retryable(self):
+        for code in ("ServiceUnavailable", "InternalError", "Timeout", "RateLimit"):
+            assert _retryable_provider_error(code) is True
+
+    def test_permanent_codes_are_not_retryable(self):
+        for code in ("auth_error", "InvalidParameter", "PermissionDenied", "Forbidden", "UnsupportedFormat", "QuotaExceeded"):
+            assert _retryable_provider_error(code) is False
+
+    def test_case_insensitive(self):
+        assert _retryable_provider_error("AUTHFAILED") is False
+        assert _retryable_provider_error("serviceunavailable") is True
+
+    def test_empty_string_is_retryable(self):
+        assert _retryable_provider_error("") is True
+
+
+class TestAudioMsCalculation:
+    def test_audio_ms_derives_from_byte_count(self):
+        client = BailianRealtimeClient(realtime_settings())
+        assert client.audio_ms == 0
+        # 16000 Hz * 2 bytes/sample = 32000 bytes/sec → 32 bytes = 1 ms
+        client.audio_bytes = 32000
+        assert client.audio_ms == 1000
+        client.audio_bytes = 16000
+        assert client.audio_ms == 500
+
+
+class TestSendAudioEdgeCases:
+    async def test_empty_pcm_is_ignored(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        await client.send_audio(b"")
+        # Only session.update was sent, no audio append
+        assert len(socket.sent) == 1
+
+    async def test_raises_when_socket_is_none(self):
+        client = BailianRealtimeClient(realtime_settings())
+        with pytest.raises(RealtimeUpstreamDisconnected):
+            await client.send_audio(b"\x00" * 100)
+
+    async def test_raises_when_socket_is_closed(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        client.closed = True
+        with pytest.raises(RealtimeUpstreamDisconnected):
+            await client.send_audio(b"\x00" * 100)
+
+    async def test_raises_on_connection_closed(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        original_send = socket.send
+
+        async def failing_send(message: str) -> None:
+            raise ConnectionClosed(None, None)  # type: ignore[arg-type]
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        socket.send = failing_send  # type: ignore[assignment]
+        with pytest.raises(RealtimeUpstreamDisconnected):
+            await client.send_audio(b"\x00" * 100)
+
+
+class TestFinishEdgeCases:
+    async def test_finish_raises_on_connection_closed(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        # Make send fail
+        async def failing_send(message: str) -> None:
+            raise ConnectionClosed(None, None)  # type: ignore[arg-type]
+
+        socket.send = failing_send  # type: ignore[assignment]
+        with pytest.raises(RealtimeUpstreamDisconnected):
+            await client.finish()
+
+    async def test_finish_is_idempotent(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        await client.finish()
+        assert client.finished is True
+        # Second call is a no-op
+        await client.finish()
+        # Only session.update + session.finish were sent
+        assert len(socket.sent) == 2
+
+
+class TestReceiveEventEdgeCases:
+    async def test_returns_disconnected_when_socket_is_none(self):
+        client = BailianRealtimeClient(realtime_settings())
+        event = await client.receive_event()
+        assert event["type"] == "error"
+        assert event["code"] == "upstream_disconnected"
+        assert event["retryable"] is True
+
+    async def test_returns_disconnected_when_closed(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        client.closed = True
+        event = await client.receive_event()
+        assert event["type"] == "error"
+        assert event["code"] == "upstream_disconnected"
+
+    async def test_handles_malformed_json(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        await socket.incoming.put("not valid json {{{")
+        assert await client.receive_event() is None
+
+    async def test_handles_bytes_payload(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        await socket.incoming.put(
+            json.dumps({"type": "session.created"}).encode("utf-8")
+        )
+        assert await client.receive_event() == {
+            "type": "connection.state",
+            "state": "connected",
+        }
+
+    async def test_handles_non_dict_json(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        await socket.incoming.put('"just a string"')
+        assert await client.receive_event() is None
+
+    async def test_duplicate_session_created_is_filtered(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        await socket.incoming.put(json.dumps({"type": "session.created"}))
+        first = await client.receive_event()
+        assert first == {"type": "connection.state", "state": "connected"}
+        # Second session.created should be filtered
+        await socket.incoming.put(json.dumps({"type": "session.created"}))
+        assert await client.receive_event() is None
+
+    async def test_session_updated_also_emits_connected(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        await socket.incoming.put(json.dumps({"type": "session.updated"}))
+        assert await client.receive_event() == {
+            "type": "connection.state",
+            "state": "connected",
+        }
+
+    async def test_transcription_failed_maps_to_error(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        await socket.incoming.put(
+            json.dumps(
+                {
+                    "type": "conversation.item.input_audio_transcription.failed",
+                    "error": {"code": "ServiceUnavailable", "message": "busy"},
+                }
+            )
+        )
+        event = await client.receive_event()
+        assert event["type"] == "error"
+        assert event["code"] == "ServiceUnavailable"
+        assert event["retryable"] is True
+
+    async def test_permanent_error_is_not_retryable(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        await socket.incoming.put(
+            json.dumps(
+                {
+                    "type": "error",
+                    "error": {"code": "InvalidParameter", "message": "bad input"},
+                }
+            )
+        )
+        event = await client.receive_event()
+        assert event["retryable"] is False
+
+    async def test_error_without_detail_dict(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        await socket.incoming.put(json.dumps({"type": "error"}))
+        event = await client.receive_event()
+        assert event["type"] == "error"
+        assert event["code"] == "error"
+        assert event["retryable"] is True
+
+    async def test_unknown_event_types_return_none(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        await socket.incoming.put(json.dumps({"type": "some.future.event"}))
+        assert await client.receive_event() is None
+
+    async def test_final_transcript_advances_last_final_ms(self):
+        socket = FakeUpstreamSocket()
+
+        async def connector(*_a, **_kw):
+            return socket
+
+        client = BailianRealtimeClient(realtime_settings(), connector=connector)
+        await client.start()
+        client.audio_bytes = 32000  # 1000 ms
+        await socket.incoming.put(
+            json.dumps(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": "第一段",
+                }
+            )
+        )
+        event1 = await client.receive_event()
+        assert event1["start_ms"] == 0
+        assert event1["end_ms"] == 1000
+        assert client.last_final_ms == 1000
+
+        client.audio_bytes = 64000  # 2000 ms
+        await socket.incoming.put(
+            json.dumps(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": "第二段",
+                }
+            )
+        )
+        event2 = await client.receive_event()
+        assert event2["start_ms"] == 1000
+        assert event2["end_ms"] == 2000
