@@ -17,6 +17,7 @@ interface AppState {
   volume: number;
   caption: string;
   sessionId: string | null;
+  localSessionId: string | null;
   requestId: string | null;
   jobId: string | null;
   jobStatus: JobStatus | null;
@@ -35,6 +36,7 @@ export const useAppStore = create<AppState>((set) => ({
   volume: 0,
   caption: "",
   sessionId: null,
+  localSessionId: null,
   requestId: null,
   jobId: null,
   jobStatus: null,
@@ -54,6 +56,7 @@ export const useAppStore = create<AppState>((set) => ({
       volume: 0,
       caption: "",
       sessionId: null,
+      localSessionId: null,
       requestId: null,
       jobId: null,
       jobStatus: null,
@@ -62,4 +65,3 @@ export const useAppStore = create<AppState>((set) => ({
       result: null,
     }),
 }));
-

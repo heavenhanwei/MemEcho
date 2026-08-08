@@ -346,6 +346,7 @@ function NowPage() {
 
       state.patch({
         sessionId: session.id,
+        localSessionId: null,
         requestId: session.request_id,
         soulState: "recording",
         elapsed: 0,
@@ -572,6 +573,7 @@ function NowPage() {
       localSessionId.current = context.localSessionId;
       state.patch({
         sessionId: session.id,
+        localSessionId: context.localSessionId,
         requestId: session.request_id,
         soulState: "processing",
         progress: 4,
@@ -642,6 +644,7 @@ function NowPage() {
       if (backend.current === "tauri") {
         const stopped = await bridge.stopCapture();
         localSessionId.current = stopped.session_id;
+        state.patch({ localSessionId: stopped.session_id });
       } else {
         recorder.current?.stop();
         recorder.current = null;
@@ -1096,7 +1099,7 @@ export function App() {
           (result ? (
             <ReportView
               result={result}
-              localSessionId={localSessionId.current}
+              localSessionId={useAppStore.getState().localSessionId}
               onBack={() => setPage("echoes")}
             />
           ) : (
