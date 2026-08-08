@@ -1014,6 +1014,95 @@ function EchoesPage() {
   );
 }
 
+type SavedEchoReport = { minutes?: { summary?: unknown } };
+
+function HistoricalEchoesPage() {
+  const { result, localSessionId, setPage, patch: patchStore } = useAppStore();
+  const isTauri = isTauriRuntime();
+  const [sessions, setSessions] = useState<import("./lib/tauri").LocalSession[]>([]);
+  const [reports, setReports] = useState<Record<string, SavedEchoReport | null>>({});
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!isTauri) return;
+    setLoading(true);
+    try {
+      const listed = await bridge.listLocalSessions();
+      const entries = await Promise.all(listed.map(async (session) => {
+        try {
+          const bundle = await bridge.getAnalysisResults(session.id);
+          const saved = bundle.results.slice().reverse().find((item) => item.analysis_type === "report");
+          return [session.id, saved ? JSON.parse(saved.content_json) as SavedEchoReport : null] as const;
+        } catch {
+          return [session.id, null] as const;
+        }
+      }));
+      setSessions(listed);
+      setReports(Object.fromEntries(entries));
+      setError("");
+    } catch (cause) {
+      setError(describeError(cause, "Unable to read saved echo sessions"));
+    } finally {
+      setLoading(false);
+    }
+  }, [isTauri]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  async function remove(sessionId: string) {
+    setBusyId(sessionId);
+    try {
+      await bridge.deleteLocalSession(sessionId);
+      if (localSessionId === sessionId) patchStore({ result: null, localSessionId: null, page: "echoes" });
+      await refresh();
+    } catch (cause) {
+      setError(describeError(cause, "Unable to delete this local session"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  function openReport(sessionId: string) {
+    const saved = reports[sessionId];
+    if (!saved) {
+      setError("This session has no saved report yet.");
+      return;
+    }
+    patchStore({ result: saved as never, localSessionId: sessionId, page: "report" });
+  }
+
+  if (!isTauri) {
+    return <EchoesPage />;
+  }
+  return (
+    <section className="list-page">
+      <p className="eyebrow">YOUR ECHOES</p>
+      <h1>本地保存的会话，随时可以回看。</h1>
+      {loading ? <p className="recovery-empty">正在读取本地会话…</p> : null}
+      {!loading && sessions.length === 0 ? <p className="recovery-empty">还没有保存的本地会话。</p> : null}
+      <div className="session-list" aria-label="Saved echo sessions">
+        {sessions.map((session) => {
+          const saved = reports[session.id];
+          const summary = saved?.minutes?.summary ? String(saved.minutes.summary) : `状态：${session.status}`;
+          return (
+            <article key={session.id}>
+              <time>{formatStarted(session.started_at)}</time>
+              <div><b>{session.title || session.source_name || session.id}</b><p>{summary}</p></div>
+              <div className="recovery-actions">
+                <button type="button" disabled={!saved || busyId === session.id} onClick={() => openReport(session.id)}>{saved ? "打开报告" : "暂无报告"}</button>
+                <button type="button" className="danger" disabled={busyId === session.id} onClick={() => void remove(session.id)}><Trash2 size={14} /> 删除</button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+      {error ? <p className="error-banner">{error}</p> : null}
+    </section>
+  );
+}
+
 function LegacyRelationsPage() {
   return (
     <section className="relations-page">
@@ -1245,7 +1334,7 @@ export function App() {
       </aside>
       <main>
         {page === "now" && <NowPage />}
-        {page === "echoes" && <EchoesPage />}
+        {page === "echoes" && <HistoricalEchoesPage />}
         {page === "relations" && <RelationsPage />}
         {page === "settings" && <SettingsPage />}
         {page === "report" &&
