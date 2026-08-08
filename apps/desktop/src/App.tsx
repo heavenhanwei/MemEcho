@@ -1021,6 +1021,7 @@ type SavedEchoReport = { minutes?: { summary?: unknown } };
 function HistoricalEchoesPage() {
   const { result, localSessionId, setPage, patch: patchStore } = useAppStore();
   const isTauri = isTauriRuntime();
+  const [recoverable, setRecoverable] = useState<RecoveryMeta[]>([]);
   const [sessions, setSessions] = useState<import("./lib/tauri").LocalSession[]>([]);
   const [reports, setReports] = useState<Record<string, SavedEchoReport | null>>({});
   const [loading, setLoading] = useState(false);
@@ -1031,7 +1032,11 @@ function HistoricalEchoesPage() {
     if (!isTauri) return;
     setLoading(true);
     try {
-      const listed = await bridge.listLocalSessions();
+      const [nextRecoverable, listedResult] = await Promise.all([
+        bridge.listRecoverableSessions(),
+        bridge.listLocalSessions(),
+      ]);
+      const listed = listedResult ?? [];
       const entries = await Promise.all(listed.map(async (session) => {
         try {
           const bundle = await bridge.getAnalysisResults(session.id);
@@ -1042,6 +1047,7 @@ function HistoricalEchoesPage() {
         }
       }));
       setSessions(listed);
+      setRecoverable(nextRecoverable ?? []);
       setReports(Object.fromEntries(entries));
       setError("");
     } catch (cause) {
@@ -1052,6 +1058,18 @@ function HistoricalEchoesPage() {
   }, [isTauri]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  async function recover(sessionId: string) {
+    setBusyId(sessionId);
+    try {
+      await bridge.recoverSession(sessionId);
+      await refresh();
+    } catch (cause) {
+      setError(describeError(cause, "Unable to recover this local session"));
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   async function remove(sessionId: string) {
     setBusyId(sessionId);
@@ -1088,6 +1106,25 @@ function HistoricalEchoesPage() {
     <section className="list-page">
       <p className="eyebrow">YOUR ECHOES</p>
       <h1>本地保存的会话，随时可以回看。</h1>
+      {recoverable.length > 0 ? (
+        <div className="recovery-section">
+          <p className="eyebrow">INTERRUPTED · 被中断的录音</p>
+          <div className="recovery-list">
+            {recoverable.map((meta) => (
+              <article key={meta.session_id} className="recovery-card">
+                <div>
+                  <b>{meta.session_id.slice(0, 8)}…</b>
+                  <p>{recoveryStatusLabel[meta.status]} · 开始于 {formatStarted(meta.started_at)}</p>
+                </div>
+                <div className="recovery-actions">
+                  <button type="button" onClick={() => void recover(meta.session_id)} disabled={busyId === meta.session_id}><RotateCcw size={14} /> 恢复</button>
+                  <button type="button" className="danger" onClick={() => void remove(meta.session_id)} disabled={busyId === meta.session_id}><Trash2 size={14} /> 删除</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {loading ? <p className="recovery-empty">正在读取本地会话…</p> : null}
       {!loading && sessions.length === 0 ? <p className="recovery-empty">还没有保存的本地会话。</p> : null}
       <div className="session-list" aria-label="Saved echo sessions">
