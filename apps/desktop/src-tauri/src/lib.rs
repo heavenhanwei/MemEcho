@@ -53,6 +53,7 @@ pub fn run() {
             commands::get_local_session,
             commands::save_analysis_results,
             commands::get_analysis_results,
+            commands::list_source_relations,
             commands::read_evidence_clip,
             commands::import_media_file,
             commands::import_text_content,

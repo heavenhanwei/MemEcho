@@ -1,4 +1,4 @@
-import type { AnalysisResult, JobStatus } from "@memecho/contracts";
+import type { AnalysisResult, JobStatus, SessionSummary } from "@memecho/contracts";
 import { create } from "zustand";
 
 export type Page = "now" | "echoes" | "report" | "relations" | "settings";
@@ -9,6 +9,29 @@ export type SoulState =
   | "processing"
   | "responding"
   | "memory";
+
+export interface RelationsMemoryCandidate {
+  id: string;
+  session_id: string;
+  segment_id: string;
+  label: string;
+  summary: string;
+  confirmed: boolean;
+  confirmed_at?: string | null;
+}
+
+export interface RelationsSourceRelation {
+  id: string;
+  memory_id: string;
+  pattern_id: string;
+  pattern_label: string;
+}
+
+export interface RelationsData {
+  sessions: SessionSummary[];
+  memoryCandidates: RelationsMemoryCandidate[];
+  sourceRelations: RelationsSourceRelation[];
+}
 
 interface AppState {
   page: Page;
@@ -24,9 +47,11 @@ interface AppState {
   progress: number;
   stageLabel: string;
   result: AnalysisResult | null;
+  relations: RelationsData;
   setPage: (page: Page) => void;
   patch: (state: Partial<AppState>) => void;
   resetSession: () => void;
+  setRelations: (relations: RelationsData) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -43,12 +68,14 @@ export const useAppStore = create<AppState>((set) => ({
   progress: 0,
   stageLabel: "",
   result: null,
+  relations: { sessions: [], memoryCandidates: [], sourceRelations: [] },
   setPage: (page) =>
     set({
       page,
       soulState: page === "relations" ? "memory" : page === "now" ? "idle" : "idle",
     }),
   patch: (state) => set(state),
+  setRelations: (relations) => set({ relations }),
   resetSession: () =>
     set({
       soulState: "idle",

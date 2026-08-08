@@ -387,6 +387,18 @@ pub fn get_analysis_results(
         .map_err(|e| e.to_string())
 }
 
+/// List source relations that involve a local session.
+#[tauri::command]
+pub fn list_source_relations(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<db::SourceRelation>, String> {
+    state
+        .db
+        .list_source_relations(&session_id)
+        .map_err(|e| e.to_string())
+}
+
 /// Read a bounded PCM WAV evidence clip without exposing its local path.
 #[tauri::command]
 pub fn read_evidence_clip(

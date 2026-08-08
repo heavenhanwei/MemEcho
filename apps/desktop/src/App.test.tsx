@@ -123,6 +123,7 @@ beforeEach(() => {
     progress: 0,
     stageLabel: "",
     result: null,
+    relations: { sessions: [], memoryCandidates: [], sourceRelations: [] },
   });
   FakeMediaRecorder.instances = [];
   FakeAudioProcessor.instances = [];
@@ -275,5 +276,65 @@ describe("App (live resilience and Tauri desktop)", () => {
     expect(calls.find((call) => call.cmd === "recover_session")?.args).toEqual({
       sessionId: "abcd-1234",
     });
+  });
+
+  it("loads only confirmed local memories into Relations", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "list_audio_devices") return [];
+      if (cmd === "list_local_sessions") {
+        return [{
+          id: "local-1",
+          title: "确认过的会话",
+          status: "completed",
+          mic_path: null,
+          loopback_path: null,
+          sample_rate: 0,
+          started_at: "2026-01-01T00:00:00Z",
+          ended_at: null,
+          duration_secs: 12,
+          recovery_status: "finalized",
+          error_code: null,
+          source_mode: "import",
+          source_path: null,
+          source_name: "notes.txt",
+          source_mime_type: "text/plain",
+          source_size_bytes: 10,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        }];
+      }
+      if (cmd === "get_analysis_results") {
+        return {
+          results: [],
+          memory_candidates: [
+            {
+              id: "confirmed-1",
+              session_id: "local-1",
+              segment_id: "segment-1",
+              content: "只显示已确认内容",
+              score: 0.9,
+              confirmed: true,
+              created_at: "2026-01-01T00:00:00Z",
+            },
+            {
+              id: "draft-1",
+              session_id: "local-1",
+              segment_id: "segment-2",
+              content: "不应显示草稿",
+              score: 0.4,
+              confirmed: false,
+              created_at: "2026-01-01T00:00:00Z",
+            },
+          ],
+        };
+      }
+      if (cmd === "list_source_relations") return [];
+      return null;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "关系" }));
+    expect((await screen.findAllByText("只显示已确认内容")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("不应显示草稿")).not.toBeInTheDocument();
   });
 });

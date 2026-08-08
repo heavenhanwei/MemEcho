@@ -103,6 +103,38 @@ export interface LocalSession {
   updated_at: string;
 }
 
+export interface LocalMemoryCandidate {
+  id: string;
+  session_id: string;
+  segment_id: string | null;
+  content: string;
+  score: number | null;
+  confirmed: boolean;
+  created_at: string;
+}
+
+export interface LocalAnalysisResult {
+  id: string;
+  session_id: string;
+  analysis_type: string;
+  content_json: string;
+  created_at: string;
+}
+
+export interface LocalAnalysisResultsBundle {
+  results: LocalAnalysisResult[];
+  memory_candidates: LocalMemoryCandidate[];
+}
+
+export interface LocalSourceRelation {
+  id: string;
+  source_session_id: string;
+  target_session_id: string;
+  relation_type: string;
+  metadata_json: string | null;
+  created_at: string;
+}
+
 export interface ImportedSource {
   kind: "media" | "text";
   path: string;
@@ -230,4 +262,13 @@ export const bridge = {
       html,
     });
   },
+
+  listLocalSessions: (status?: string | null) =>
+    invoke<LocalSession[]>("list_local_sessions", { status: status ?? null }),
+
+  getAnalysisResults: (sessionId: string) =>
+    invoke<LocalAnalysisResultsBundle>("get_analysis_results", { sessionId }),
+
+  listSourceRelations: (sessionId: string) =>
+    invoke<LocalSourceRelation[]>("list_source_relations", { sessionId }),
 };

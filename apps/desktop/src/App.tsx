@@ -17,6 +17,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EchoSphere } from "./components/EchoSphere";
 import { ReportView } from "./components/ReportView";
+import { RelationsView } from "./components/RelationsView";
 import {
   gateway,
   gatewayBaseUrl,
@@ -31,7 +32,7 @@ import {
   type RecoveryMeta,
   type RecoveryStatus,
 } from "./lib/tauri";
-import { useAppStore, type Page } from "./store";
+import { useAppStore, type Page, type RelationsData } from "./store";
 
 const nav: Array<{ page: Page; label: string; icon: typeof Radio }> = [
   { page: "now", label: "此刻", icon: Radio },
@@ -1013,7 +1014,7 @@ function EchoesPage() {
   );
 }
 
-function RelationsPage() {
+function LegacyRelationsPage() {
   return (
     <section className="relations-page">
       <div className="relation-copy">
@@ -1031,6 +1032,158 @@ function RelationsPage() {
         </span>
         <span>0 条长期记忆 · 默认关闭</span>
       </div>
+    </section>
+  );
+}
+
+function localSessionSummary(session: import("./lib/tauri").LocalSession) {
+  const status = session.status === "completed"
+    ? "complete"
+    : session.status === "failed"
+      ? "failed"
+      : "draft";
+  return {
+    id: session.id,
+    title: session.title ?? session.source_name ?? session.id,
+    context: session.source_mode === "import" ? "import" : "recording",
+    occurred_at: session.started_at,
+    duration_ms: Math.max(0, Math.round((session.duration_secs ?? 0) * 1000)),
+    status: status as import("@memecho/contracts").SessionSummary["status"],
+    participant_count: 0,
+    has_result: false,
+  };
+}
+
+function parseRelationMetadata(value: string | null): {
+  memoryIds: string[];
+  patternId?: string;
+  patternLabel?: string;
+} {
+  if (!value) return { memoryIds: [] };
+  try {
+    const metadata = JSON.parse(value) as Record<string, unknown>;
+    const rawIds = metadata.memory_ids ?? metadata.memory_id;
+    const memoryIds = Array.isArray(rawIds)
+      ? rawIds.filter((item): item is string => typeof item === "string")
+      : typeof rawIds === "string"
+        ? [rawIds]
+        : [];
+    return {
+      memoryIds,
+      patternId: typeof metadata.pattern_id === "string" ? metadata.pattern_id : undefined,
+      patternLabel:
+        typeof metadata.pattern_label === "string" ? metadata.pattern_label : undefined,
+    };
+  } catch {
+    return { memoryIds: [] };
+  }
+}
+
+async function loadRelationsData(): Promise<RelationsData> {
+  const localSessions = await bridge.listLocalSessions();
+  const bundles = await Promise.all(
+    localSessions.map(async (session) => ({
+      session,
+      bundle: await bridge.getAnalysisResults(session.id),
+      relations: await bridge.listSourceRelations(session.id),
+    })),
+  );
+  const sessions = bundles.map(({ session, bundle }) => ({
+    ...localSessionSummary(session),
+    has_result: bundle.results.length > 0,
+  }));
+  const memoryCandidates = bundles.flatMap(({ bundle }) =>
+    bundle.memory_candidates
+      .filter((candidate) => candidate.confirmed && candidate.segment_id)
+      .map((candidate) => ({
+        id: candidate.id,
+        session_id: candidate.session_id,
+        segment_id: candidate.segment_id as string,
+        label:
+          candidate.content.length > 32
+            ? `${candidate.content.slice(0, 32)}…`
+            : candidate.content,
+        summary: candidate.content,
+        confirmed: true,
+        confirmed_at: candidate.created_at,
+      })),
+  );
+  const confirmedIds = new Set(memoryCandidates.map((candidate) => candidate.id));
+  const sourceRelations = bundles.flatMap(({ relations }) =>
+    relations.flatMap((relation) => {
+      const metadata = parseRelationMetadata(relation.metadata_json);
+      if (metadata.memoryIds.length === 0) return [];
+      const patternId = metadata.patternId ?? relation.relation_type;
+      const patternLabel = metadata.patternLabel ?? relation.relation_type;
+      return metadata.memoryIds
+        .filter((memoryId) => confirmedIds.has(memoryId))
+        .map((memoryId) => ({
+          id: `${relation.id}:${memoryId}`,
+          memory_id: memoryId,
+          pattern_id: patternId,
+          pattern_label: patternLabel,
+        }));
+    }),
+  );
+  return { sessions, memoryCandidates, sourceRelations };
+}
+
+function RelationsPage() {
+  const { relations, setRelations, patch, setPage } = useAppStore();
+  const isTauri = isTauriRuntime();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const refresh = useCallback(async () => {
+    if (!isTauri) return;
+    setLoading(true);
+    try {
+      setRelations(await loadRelationsData());
+      setError("");
+    } catch (cause) {
+      setError(describeError(cause, "无法读取本地关系数据"));
+    } finally {
+      setLoading(false);
+    }
+  }, [isTauri, setRelations]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const openSource = useCallback(
+    async (sessionId: string, _segmentId: string) => {
+      try {
+        const bundle = await bridge.getAnalysisResults(sessionId);
+        const report = [...bundle.results]
+          .reverse()
+          .find((entry) => entry.analysis_type === "report");
+        if (!report) {
+          setError("该来源尚未生成可打开的分析报告");
+          return;
+        }
+        const parsed = JSON.parse(report.content_json);
+        patch({ result: parsed, localSessionId: sessionId, page: "report" });
+        setPage("report");
+      } catch (cause) {
+        setError(describeError(cause, "无法打开来源报告"));
+      }
+    },
+    [patch, setPage],
+  );
+
+  if (loading && relations.sessions.length === 0) {
+    return <section className="relations-page"><p className="eyebrow">MEMORY ECHO</p><p>正在读取已确认的本地记忆…</p></section>;
+  }
+  return (
+    <section className="relations-page">
+      {error && <p className="error-banner">{error}</p>}
+      <RelationsView
+        sessions={relations.sessions}
+        memoryCandidates={relations.memoryCandidates}
+        sourceRelations={relations.sourceRelations}
+        onOpenSource={(sessionId, segmentId) => void openSource(sessionId, segmentId)}
+      />
     </section>
   );
 }
