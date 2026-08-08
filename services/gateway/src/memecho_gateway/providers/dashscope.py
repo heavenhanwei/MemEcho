@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -13,6 +14,8 @@ log = logging.getLogger(__name__)
 
 _POLL_INTERVAL_S = 2.0
 _MAX_POLL_ATTEMPTS = 150
+
+_TRANSCRIPTION_SUFFIX = "/api/v1/services/audio/asr/transcription"
 
 
 class DashScopeClient:
@@ -38,6 +41,19 @@ class DashScopeClient:
             task="emotion_labels",
         )
 
+    def _build_transcription_url(self) -> str:
+        base = self.settings.bailian_audio_base_url.rstrip("/")
+        if base.endswith("/transcription"):
+            return base
+        return f"{base}{_TRANSCRIPTION_SUFFIX}"
+
+    def _build_tasks_url(self, task_id: str) -> str:
+        base = self.settings.bailian_audio_base_url.rstrip("/")
+        if base.endswith("/transcription"):
+            parsed = urlparse(base)
+            return f"{parsed.scheme}://{parsed.netloc}/api/v1/tasks/{task_id}"
+        return f"{base}/api/v1/tasks/{task_id}"
+
     async def _submit_and_poll(
         self, model: str, audio_url: str, task: str
     ) -> dict[str, Any]:
@@ -47,37 +63,34 @@ class DashScopeClient:
         headers = {
             "Authorization": f"Bearer {self.settings.bailian_audio_api_key}",
             "Content-Type": "application/json",
+            "X-DashScope-Async": "enable",
         }
-        base = self.settings.bailian_audio_base_url.rstrip("/")
 
+        submit_url = self._build_transcription_url()
         submit_payload: dict[str, Any] = {
             "model": model,
-            "input": {"audio_url": audio_url},
+            "input": {"file_urls": [audio_url]},
             "parameters": {"task": task},
         }
 
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{base}/v1/services/{model}/tasks",
-                json=submit_payload,
-                headers=headers,
-            )
+            resp = await client.post(submit_url, json=submit_payload, headers=headers)
             resp.raise_for_status()
             task_data = resp.json()
             task_id = task_data.get("output", {}).get("task_id")
             if not task_id:
                 raise RuntimeError(f"No task_id in DashScope response: {task_data}")
 
-        return await self._poll_result(base, model, task_id, headers)
+        return await self._poll_result(task_id, headers)
 
     async def _poll_result(
-        self, base: str, model: str, task_id: str, headers: dict[str, str]
+        self, task_id: str, headers: dict[str, str]
     ) -> dict[str, Any]:
-        url = f"{base}/v1/services/{model}/tasks/{task_id}"
+        url = self._build_tasks_url(task_id)
         async with httpx.AsyncClient(timeout=30) as client:
             for attempt in range(_MAX_POLL_ATTEMPTS):
                 await asyncio.sleep(_POLL_INTERVAL_S)
-                resp = await client.get(url, headers=headers)
+                resp = await client.post(url, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
                 status = data.get("output", {}).get("task_status", "")
