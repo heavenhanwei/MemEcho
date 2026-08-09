@@ -61,6 +61,8 @@ $env:MEMECHO_PROVIDER = $Provider
 $env:MEMECHO_DEMO_TOKEN = $Token
 $env:MEMECHO_DATA_DIR = Join-Path $GatewayDir "tmp"
 $env:MEMECHO_PUBLIC_BASE_URL = "http://127.0.0.1:$Port"
+$gatewaySource = Join-Path $GatewayDir "src"
+$env:PYTHONPATH = if ($env:PYTHONPATH) { "$gatewaySource;$env:PYTHONPATH" } else { $gatewaySource }
 
 Write-Host ""
 Write-Host "Starting memEcho gateway on http://127.0.0.1:$Port"
