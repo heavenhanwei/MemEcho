@@ -35,16 +35,19 @@ fn config_path(sessions_dir: &Path) -> std::path::PathBuf {
         .join(CONFIG_FILE_NAME)
 }
 
-pub fn load_gateway_url(sessions_dir: &Path) -> String {
+pub fn load_saved_gateway_url(sessions_dir: &Path) -> Option<String> {
     let path = config_path(sessions_dir);
     match std::fs::read_to_string(&path) {
         Ok(data) => serde_json::from_str::<GatewayConfig>(&data)
             .map(|c| c.url)
             .ok()
-            .filter(|url| validate_gateway_url(url).is_ok())
-            .unwrap_or_else(default_gateway_url),
-        Err(_) => default_gateway_url(),
+            .filter(|url| validate_gateway_url(url).is_ok()),
+        Err(_) => None,
     }
+}
+
+pub fn load_gateway_url(sessions_dir: &Path) -> String {
+    load_saved_gateway_url(sessions_dir).unwrap_or_else(default_gateway_url)
 }
 
 pub fn save_gateway_url(sessions_dir: &Path, url: &str) -> Result<(), String> {
@@ -200,8 +203,8 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
         // Default when no config file
-        let url = load_gateway_url(&sessions_dir);
-        assert_eq!(url, DEFAULT_GATEWAY_URL);
+        assert_eq!(load_saved_gateway_url(&sessions_dir), None);
+        assert_eq!(load_gateway_url(&sessions_dir), DEFAULT_GATEWAY_URL);
 
         // Save and reload
         save_gateway_url(&sessions_dir, "https://gw.example.com").unwrap();
@@ -334,6 +337,7 @@ mod tests {
         let path = sessions_dir.parent().unwrap().join(CONFIG_FILE_NAME);
         std::fs::write(&path, r#"{"url":"http://remote.example.com"}"#).unwrap();
 
+        assert_eq!(load_saved_gateway_url(&sessions_dir), None);
         assert_eq!(load_gateway_url(&sessions_dir), DEFAULT_GATEWAY_URL);
         std::fs::remove_dir_all(&dir).ok();
     }

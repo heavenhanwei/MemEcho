@@ -286,5 +286,5 @@ export const bridge = {
   setGatewayUrl: (gatewayUrl: string) =>
     invoke<void>("set_gateway_url", { gatewayUrl }),
 
-  getGatewayUrl: () => invoke<string>("get_gateway_url"),
+  getGatewayUrl: () => invoke<string | null>("get_gateway_url"),
 };

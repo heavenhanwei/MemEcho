@@ -42,7 +42,7 @@ export async function initGatewayConfig(): Promise<string> {
     const { bridge } = await import("./tauri");
     try {
       const savedUrl = await bridge.getGatewayUrl();
-      if (savedUrl) _url = savedUrl;
+      _url = savedUrl || BUILD_TIME_URL || DEFAULT_URL;
     } catch {
       // bridge not available; keep default
     }

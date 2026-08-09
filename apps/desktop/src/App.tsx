@@ -139,7 +139,7 @@ function NowPage() {
         if (cancelled) return;
         if (isTauri) {
           bridge
-            .checkGateway()
+            .checkGateway(getGatewayUrl())
             .then((status) => {
               if (cancelled) return;
               setGatewayOk(status.ok);
@@ -183,7 +183,7 @@ function NowPage() {
     try {
       await initGatewayConfig();
       if (isTauri) {
-        const status = await bridge.checkGateway();
+        const status = await bridge.checkGateway(getGatewayUrl());
         setGatewayOk(status.ok);
         if (!status.ok) {
           setGatewayError(

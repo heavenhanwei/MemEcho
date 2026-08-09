@@ -522,8 +522,9 @@ pub fn set_gateway_url(gateway_url: String, state: State<'_, AppState>) -> Resul
     crate::gateway_check::save_gateway_url(&state.sessions_dir, &gateway_url)
 }
 
-/// Return the currently configured gateway URL.
+/// Return a user-saved gateway URL, or null on first run so the frontend can
+/// retain the HTTPS URL embedded in the desktop bundle.
 #[tauri::command]
-pub fn get_gateway_url(state: State<'_, AppState>) -> String {
-    crate::gateway_check::load_gateway_url(&state.sessions_dir)
+pub fn get_gateway_url(state: State<'_, AppState>) -> Option<String> {
+    crate::gateway_check::load_saved_gateway_url(&state.sessions_dir)
 }
