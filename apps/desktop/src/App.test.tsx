@@ -4,7 +4,7 @@ import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { gateway } from "./lib/api";
+import { gateway, setGatewayToken } from "./lib/api";
 import { useAppStore } from "./store";
 
 vi.mock("@react-three/fiber", () => ({
@@ -181,6 +181,28 @@ describe("App (web preview)", () => {
 });
 
 describe("App (live resilience and Tauri desktop)", () => {
+  it("stores the gateway token through the desktop credential bridge", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "list_audio_devices") return [];
+      if (cmd === "check_gateway") {
+        return { ok: true, url: "https://gateway.example", provider: "mock" };
+      }
+      return null;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByText("我的"));
+
+    const tokenInput = await screen.findByLabelText("访问令牌");
+    fireEvent.change(tokenInput, { target: { value: "runtime-only-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "安全保存" }));
+
+    await waitFor(() =>
+      expect(setGatewayToken).toHaveBeenCalledWith("runtime-only-token"),
+    );
+    expect(tokenInput).toHaveValue("");
+  });
+
   it("streams PCM and keeps local recording alive when live captions disconnect", async () => {
     const media = new FakeMediaStream();
     vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(
