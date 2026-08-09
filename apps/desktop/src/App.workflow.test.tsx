@@ -55,6 +55,8 @@ class FakeWebSocket {
 }
 
 class FakeAudioContext {
+  sampleRate = 48_000;
+  destination = {};
   createAnalyser() {
     return {
       fftSize: 0,
@@ -63,7 +65,17 @@ class FakeAudioContext {
     };
   }
   createMediaStreamSource() {
-    return { connect: () => undefined };
+    return { connect: () => undefined, disconnect: () => undefined };
+  }
+  createScriptProcessor() {
+    return {
+      onaudioprocess: null as ((event: AudioProcessingEvent) => void) | null,
+      connect: () => undefined,
+      disconnect: () => undefined,
+    };
+  }
+  resume() {
+    return Promise.resolve();
   }
   close() {
     return Promise.resolve();
