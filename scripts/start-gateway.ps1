@@ -10,6 +10,7 @@
 #   - Gateway dependencies installed: pip install -e ".[dev]" (from services/gateway/)
 
 param(
+    [ValidateRange(1, 65535)]
     [int]$Port = 8787,
     [string]$Provider = "mock",
     [string]$Token = "change-me"
@@ -18,21 +19,42 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$GatewayDir = Join-Path (Split-Path -Parent $ScriptDir) "services" "gateway"
+$ProjectDir = Split-Path -Parent $ScriptDir
+$GatewayDir = Join-Path -Path $ProjectDir -ChildPath "services\gateway"
 
 if (-not (Test-Path (Join-Path $GatewayDir "pyproject.toml"))) {
-    Write-Error "Gateway not found at $GatewayDir — run this script from the project root."
+    Write-Error "Gateway not found at $GatewayDir — check that the memecho-desktop project is complete."
     exit 1
 }
 
-# Check Python
-try {
-    $pyVersion = python --version 2>&1
-    Write-Host "Using $pyVersion"
-} catch {
-    Write-Error "Python 3.12+ is required but not found on PATH."
+# Check Python. Prefer PATH, then the standard per-user Python 3.12 install
+# location used by the Windows installer. This avoids requiring a global PATH
+# change on a demo machine.
+$pythonPath = $null
+$pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+if ($pythonCommand) {
+    $pythonPath = $pythonCommand.Source
+}
+if (-not $pythonPath) {
+    $localPythonRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\Python"
+    foreach ($version in @("Python312", "Python313", "Python311")) {
+        $candidate = Join-Path $localPythonRoot "$version\python.exe"
+        if (Test-Path -LiteralPath $candidate) {
+            $pythonPath = $candidate
+            break
+        }
+    }
+}
+if (-not $pythonPath) {
+    Write-Error "Python 3.12+ is required. Add Python to PATH or install it under %LocalAppData%\Programs\Python."
     exit 1
 }
+$pyVersion = & $pythonPath --version 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Python was found at $pythonPath but could not be started."
+    exit 1
+}
+Write-Host "Using $pyVersion ($pythonPath)"
 
 # Set environment variables (does NOT modify services/gateway/.env)
 $env:MEMECHO_PROVIDER = $Provider
@@ -49,4 +71,4 @@ Write-Host "Press Ctrl+C to stop."
 Write-Host ""
 
 Set-Location $GatewayDir
-python -m uvicorn memecho_gateway.main:app --host 127.0.0.1 --port $Port
+& $pythonPath -m uvicorn memecho_gateway.main:app --host 127.0.0.1 --port $Port
