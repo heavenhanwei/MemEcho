@@ -99,7 +99,9 @@ function NowPage() {
   const localSessionId = useRef<string | null>(null);
   const workflow = useRef<WorkflowContext | null>(null);
   const progressAbort = useRef<AbortController | null>(null);
-  const [source, setSource] = useState<"microphone" | "mixed">("mixed");
+  const [source, setSource] = useState<"microphone" | "mixed">(() =>
+    isTauri ? "mixed" : "microphone",
+  );
   const [error, setError] = useState("");
   const [meterNote, setMeterNote] = useState("");
   const [devices, setDevices] = useState<AudioDevice[]>([]);
@@ -114,6 +116,7 @@ function NowPage() {
   const [textImportBusy, setTextImportBusy] = useState(false);
   const [gatewayOk, setGatewayOk] = useState<boolean | null>(null);
   const [gatewayError, setGatewayError] = useState("");
+  const [gatewayProvider, setGatewayProvider] = useState("");
 
   useEffect(() => {
     if (!isTauri) return;
@@ -143,6 +146,7 @@ function NowPage() {
             .then((status) => {
               if (cancelled) return;
               setGatewayOk(status.ok);
+              setGatewayProvider(status.provider ?? "");
               if (!status.ok) {
                 setGatewayError(
                   status.error ?? `Cannot reach analysis gateway at ${status.url}`,
@@ -156,8 +160,11 @@ function NowPage() {
           if (typeof gateway.health === "function") {
             gateway
               .health()
-              .then(() => {
-                if (!cancelled) setGatewayOk(true);
+              .then((health) => {
+                if (!cancelled) {
+                  setGatewayOk(true);
+                  setGatewayProvider(health.provider ?? "");
+                }
               })
               .catch(() => {
                 if (cancelled) return;
@@ -185,6 +192,7 @@ function NowPage() {
       if (isTauri) {
         const status = await bridge.checkGateway(getGatewayUrl());
         setGatewayOk(status.ok);
+        setGatewayProvider(status.provider ?? "");
         if (!status.ok) {
           setGatewayError(
             status.error ?? `Cannot reach analysis gateway at ${status.url}`,
@@ -192,7 +200,8 @@ function NowPage() {
         }
       } else {
         if (typeof gateway.health === "function") {
-          await gateway.health();
+          const health = await gateway.health();
+          setGatewayProvider(health.provider ?? "");
         }
         setGatewayOk(true);
       }
@@ -849,8 +858,10 @@ function NowPage() {
           <button
             className={source === "mixed" ? "active" : ""}
             onClick={() => setSource("mixed")}
+            disabled={!isTauri}
+            title={!isTauri ? "系统声音采集仅支持 Windows 桌面端" : undefined}
           >
-            <AudioLines size={16} /> 麦克风＋系统声音
+            <AudioLines size={16} /> 麦克风＋系统声音{!isTauri ? "（桌面端）" : ""}
           </button>
           <button
             className={source === "microphone" ? "active" : ""}
@@ -909,6 +920,11 @@ function NowPage() {
             ? "桌面原生录音 · 麦克风＋系统输出双轨（WASAPI）"
             : "网页演示模式 · 使用 MediaRecorder 仅录制麦克风"}
         </p>
+        {gatewayProvider === "mock" && (
+          <p className="live-scope-note">
+            Mock 模式仅返回固定演示字幕，不会识别实际说话内容；真实字幕需要使用百炼实时 ASR。
+          </p>
+        )}
       </div>
       <div className="soul-column">
         <EchoSphere state={state.soulState} energy={state.volume} onActivate={start} />

@@ -162,9 +162,14 @@ describe("App (web preview)", () => {
   it("shows the recording entry and the web demo note", () => {
     render(<App />);
     expect(screen.getByText("点击球体，开始录音")).toBeInTheDocument();
-    expect(screen.getByText("麦克风＋系统声音")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /麦克风＋系统声音/ })).toBeDisabled();
     expect(screen.getByText(/网页演示模式/)).toBeInTheDocument();
     expect(screen.queryByText(/桌面原生录音/)).not.toBeInTheDocument();
+  });
+
+  it("labels mock subtitles honestly", async () => {
+    render(<App />);
+    expect(await screen.findByText(/Mock 模式仅返回固定演示字幕/)).toBeInTheDocument();
   });
 
   it("falls back to MediaRecorder for capture", async () => {
@@ -175,7 +180,7 @@ describe("App (web preview)", () => {
     fireEvent.click(screen.getByText("点击球体，开始录音"));
     await waitFor(() => expect(FakeMediaRecorder.instances).toHaveLength(1));
     expect(FakeMediaRecorder.instances[0].start).toHaveBeenCalled();
-    expect(gateway.createSession).toHaveBeenCalled();
+    expect(gateway.createSession).toHaveBeenCalledWith("新的回声", "microphone");
     expect(screen.getByText("正在录音")).toBeInTheDocument();
   });
 });
