@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     memecho_demo_token: str = "change-me"
     memecho_data_dir: Path = Path("./tmp")
     memecho_public_base_url: str = "http://127.0.0.1:8787"
+    # Comma-separated browser origins. Keep this explicit so production does
+    # not accidentally become an open CORS proxy.
+    memecho_allowed_origins: str = (
+        "http://localhost:1420,http://127.0.0.1:1420,"
+        "http://tauri.localhost,tauri://localhost"
+    )
 
     bailian_text_base_url: str = ""
     bailian_text_api_key: str = ""
