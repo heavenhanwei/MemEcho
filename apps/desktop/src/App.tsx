@@ -70,6 +70,58 @@ type WorkflowContext = {
 
 type LiveStatus = "connecting" | "connected" | "reconnecting" | "offline";
 
+type BrowserAudioCapture = {
+  media: MediaStream;
+  stop: () => Promise<void>;
+};
+
+async function openBrowserAudioCapture(
+  source: "microphone" | "mixed",
+): Promise<BrowserAudioCapture> {
+  const microphone = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true },
+  });
+  if (source === "microphone") {
+    return {
+      media: microphone,
+      stop: async () => microphone.getTracks().forEach((track) => track.stop()),
+    };
+  }
+
+  let shared: MediaStream | null = null;
+  let context: AudioContext | null = null;
+  try {
+    shared = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    if (shared.getAudioTracks().length === 0) {
+      throw new Error("共享内容没有音频，请选择 Chrome 标签页并勾选“分享标签页音频”");
+    }
+
+    context = new AudioContext();
+    const destination = context.createMediaStreamDestination();
+    context.createMediaStreamSource(microphone).connect(destination);
+    context.createMediaStreamSource(shared).connect(destination);
+    await context.resume();
+    const mixed = destination.stream;
+    let stopped = false;
+    return {
+      media: mixed,
+      stop: async () => {
+        if (stopped) return;
+        stopped = true;
+        mixed.getTracks().forEach((track) => track.stop());
+        microphone.getTracks().forEach((track) => track.stop());
+        shared?.getTracks().forEach((track) => track.stop());
+        await context?.close();
+      },
+    };
+  } catch (cause) {
+    microphone.getTracks().forEach((track) => track.stop());
+    shared?.getTracks().forEach((track) => track.stop());
+    await context?.close();
+    throw cause;
+  }
+}
+
 const liveStatusLabel: Record<LiveStatus, string> = {
   connecting: "\u4e34\u65f6\u5b57\u5e55\u8fde\u63a5\u4e2d",
   connected: "\u4e34\u65f6\u5b57\u5e55\u5df2\u8fde\u63a5",
@@ -90,6 +142,7 @@ function NowPage() {
   const socket = useRef<WebSocket | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const liveCapture = useRef<LivePcmCapture | null>(null);
+  const browserCaptureStop = useRef<(() => Promise<void>) | null>(null);
   const recordingActive = useRef(false);
   const liveSessionId = useRef<string | null>(null);
   const liveRetryTimer = useRef<number | undefined>(undefined);
@@ -117,6 +170,8 @@ function NowPage() {
   const [gatewayOk, setGatewayOk] = useState<boolean | null>(null);
   const [gatewayError, setGatewayError] = useState("");
   const [gatewayProvider, setGatewayProvider] = useState("");
+  const canCaptureBrowserAudio =
+    !isTauri && typeof navigator.mediaDevices?.getDisplayMedia === "function";
 
   useEffect(() => {
     if (!isTauri) return;
@@ -349,6 +404,8 @@ function NowPage() {
   async function stopLiveAudio(flush = false) {
     const capture = liveCapture.current;
     liveCapture.current = null;
+    const stopBrowserCapture = browserCaptureStop.current;
+    browserCaptureStop.current = null;
     try {
       await capture?.stop(flush);
     } catch {
@@ -356,6 +413,7 @@ function NowPage() {
     } finally {
       stream.current?.getTracks().forEach((track) => track.stop());
       stream.current = null;
+      await stopBrowserCapture?.();
       useAppStore.getState().patch({ volume: 0 });
     }
   }
@@ -416,13 +474,12 @@ function NowPage() {
         }
       } else {
         backend.current = "web";
-        const media = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true },
-        });
-        stream.current = media;
-        recorder.current = new MediaRecorder(media);
+        const browserCapture = await openBrowserAudioCapture(source);
+        stream.current = browserCapture.media;
+        browserCaptureStop.current = browserCapture.stop;
+        recorder.current = new MediaRecorder(browserCapture.media);
         recorder.current.start(1000);
-        startLiveAudio(media);
+        startLiveAudio(browserCapture.media);
       }
       recordingActive.current = true;
       if (liveCapture.current) {
@@ -858,10 +915,15 @@ function NowPage() {
           <button
             className={source === "mixed" ? "active" : ""}
             onClick={() => setSource("mixed")}
-            disabled={!isTauri}
-            title={!isTauri ? "系统声音采集仅支持 Windows 桌面端" : undefined}
+            disabled={!isTauri && !canCaptureBrowserAudio}
+            title={
+              !isTauri && !canCaptureBrowserAudio
+                ? "当前浏览器不支持共享标签页音频"
+                : undefined
+            }
           >
-            <AudioLines size={16} /> 麦克风＋系统声音{!isTauri ? "（桌面端）" : ""}
+            <AudioLines size={16} />
+            {isTauri ? "麦克风＋系统声音" : "麦克风＋标签页声音"}
           </button>
           <button
             className={source === "microphone" ? "active" : ""}
@@ -915,10 +977,17 @@ function NowPage() {
             {"\u5b9e\u65f6\u5b57\u5e55\u4ec5\u4f7f\u7528\u9ea6\u514b\u98ce\uff1b\u6b63\u5f0f\u62a5\u544a\u4ecd\u4f7f\u7528\u672c\u5730\u9ea6\u514b\u98ce\u4e0e\u7cfb\u7edf\u58f0\u97f3\u53cc\u8f68\u3002"}
           </p>
         )}
+        {!isTauri && source === "mixed" && (
+          <p className="live-scope-note">
+            开始录音后请选择 Chrome 标签页，并勾选“分享标签页音频”；浏览器会同时混合麦克风。
+          </p>
+        )}
         <p className="backend-note">
           {isTauri
             ? "桌面原生录音 · 麦克风＋系统输出双轨（WASAPI）"
-            : "网页演示模式 · 使用 MediaRecorder 仅录制麦克风"}
+            : canCaptureBrowserAudio
+              ? "网页调试模式 · 麦克风或用户授权的 Chrome 标签页音频"
+              : "网页调试模式 · 当前浏览器仅支持麦克风"}
         </p>
         {gatewayProvider === "mock" && (
           <p className="live-scope-note">

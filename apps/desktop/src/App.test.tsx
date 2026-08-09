@@ -35,6 +35,9 @@ vi.mock("./lib/api", () => ({
 
 class FakeMediaStream {
   stop = vi.fn();
+  getAudioTracks() {
+    return [{ stop: this.stop }];
+  }
   getTracks() {
     return [{ stop: this.stop }];
   }
@@ -108,6 +111,9 @@ class FakeAudioContext {
   createScriptProcessor() {
     return new FakeAudioProcessor();
   }
+  createMediaStreamDestination() {
+    return { stream: new FakeMediaStream() as unknown as MediaStream };
+  }
   resume() {
     return Promise.resolve();
   }
@@ -162,14 +168,35 @@ describe("App (web preview)", () => {
   it("shows the recording entry and the web demo note", () => {
     render(<App />);
     expect(screen.getByText("点击球体，开始录音")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /麦克风＋系统声音/ })).toBeDisabled();
-    expect(screen.getByText(/网页演示模式/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /麦克风＋标签页声音/ })).toBeDisabled();
+    expect(screen.getByText(/网页调试模式/)).toBeInTheDocument();
     expect(screen.queryByText(/桌面原生录音/)).not.toBeInTheDocument();
   });
 
   it("labels mock subtitles honestly", async () => {
     render(<App />);
     expect(await screen.findByText(/Mock 模式仅返回固定演示字幕/)).toBeInTheDocument();
+  });
+
+  it("mixes microphone and a user-authorized Chrome tab audio stream", async () => {
+    const microphone = new FakeMediaStream();
+    const sharedTab = new FakeMediaStream();
+    const getUserMedia = vi.fn().mockResolvedValue(microphone as unknown as MediaStream);
+    const getDisplayMedia = vi.fn().mockResolvedValue(sharedTab as unknown as MediaStream);
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia, getDisplayMedia },
+    });
+
+    render(<App />);
+    const mixedButton = screen.getByRole("button", { name: /麦克风＋标签页声音/ });
+    expect(mixedButton).toBeEnabled();
+    fireEvent.click(mixedButton);
+    fireEvent.click(screen.getByText("点击球体，开始录音"));
+
+    await waitFor(() => expect(getDisplayMedia).toHaveBeenCalled());
+    expect(getDisplayMedia).toHaveBeenCalledWith({ video: true, audio: true });
+    expect(gateway.createSession).toHaveBeenCalledWith("新的回声", "mixed");
   });
 
   it("falls back to MediaRecorder for capture", async () => {

@@ -76,6 +76,7 @@ async def test_client_forwards_pcm_and_maps_official_events():
         "model=qwen3-asr-flash-realtime&heartbeat=true"
     )
     assert connection["additional_headers"]["Authorization"] == "Bearer sk-test"
+    assert connection["additional_headers"]["OpenAI-Beta"] == "realtime=v1"
     assert connection["ping_interval"] == 20.0
     update = socket.sent[0]
     assert update["type"] == "session.update"

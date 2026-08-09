@@ -104,7 +104,8 @@ class BailianRealtimeClient:
             self.settings.bailian_realtime_model,
         )
         headers = {
-            "Authorization": f"Bearer {self.settings.bailian_audio_api_key}"
+            "Authorization": f"Bearer {self.settings.bailian_audio_api_key}",
+            "OpenAI-Beta": "realtime=v1",
         }
         if self.settings.bailian_workspace_id:
             headers["X-DashScope-WorkSpace"] = self.settings.bailian_workspace_id
