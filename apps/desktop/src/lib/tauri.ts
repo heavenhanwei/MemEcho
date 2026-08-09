@@ -148,6 +148,14 @@ export interface ImportedSession {
   source: ImportedSource;
 }
 
+export interface GatewayStatus {
+  ok: boolean;
+  url: string;
+  provider?: string;
+  version?: string;
+  error?: string;
+}
+
 export class DesktopRuntimeRequiredError extends Error {
   constructor(operation: string) {
     super(`${operation} is available only in the installed memEcho desktop app.`);
@@ -271,4 +279,12 @@ export const bridge = {
 
   listSourceRelations: (sessionId: string) =>
     invoke<LocalSourceRelation[]>("list_source_relations", { sessionId }),
+
+  checkGateway: (gatewayUrl?: string | null) =>
+    invoke<GatewayStatus>("check_gateway", { gatewayUrl: gatewayUrl ?? null }),
+
+  setGatewayUrl: (gatewayUrl: string) =>
+    invoke<void>("set_gateway_url", { gatewayUrl }),
+
+  getGatewayUrl: () => invoke<string>("get_gateway_url"),
 };

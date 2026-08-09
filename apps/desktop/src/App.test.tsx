@@ -23,7 +23,14 @@ vi.mock("./lib/api", () => ({
     job: vi.fn(),
     result: vi.fn(),
     chat: vi.fn(),
+    health: vi.fn().mockResolvedValue({ status: "ok", provider: "mock" }),
   },
+  gatewayBaseUrl: "http://127.0.0.1:8787",
+  getGatewayUrl: () => "http://127.0.0.1:8787",
+  hasGatewayToken: () => false,
+  setGatewayUrl: vi.fn().mockResolvedValue(undefined),
+  setGatewayToken: vi.fn().mockResolvedValue(undefined),
+  initGatewayConfig: vi.fn().mockResolvedValue("http://127.0.0.1:8787"),
 }));
 
 class FakeMediaStream {

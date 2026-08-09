@@ -130,6 +130,10 @@ describe("gateway jobEvents", () => {
   it("passes an external abort signal and stops on AbortController cancellation", async () => {
     const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
+        if (init?.signal?.aborted) {
+          reject(new DOMException("Aborted", "AbortError"));
+          return;
+        }
         init?.signal?.addEventListener("abort", () => {
           reject(new DOMException("Aborted", "AbortError"));
         });

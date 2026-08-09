@@ -4,11 +4,85 @@ import type {
   Participant,
   RealtimeEvent,
 } from "@memecho/contracts";
+import { isTauriRuntime } from "./tauri";
 
-const baseUrl = import.meta.env.VITE_GATEWAY_URL ?? "http://127.0.0.1:8787";
-export const gatewayBaseUrl = baseUrl;
-const token = import.meta.env.VITE_GATEWAY_TOKEN ?? "change-me";
+const BUILD_TIME_URL: string = import.meta.env.VITE_GATEWAY_URL ?? "";
+const BUILD_TIME_TOKEN: string = import.meta.env.VITE_GATEWAY_TOKEN ?? "";
+const DEFAULT_URL = "http://127.0.0.1:8787";
+const DEFAULT_TOKEN = "change-me";
+const GATEWAY_CREDENTIAL_NAME = "gateway_token";
 const ERROR_DETAIL_LIMIT = 320;
+
+// ── Runtime mutable state ───────────────────────────────────────────────────
+// All gateway consumers read from these; they are initialized from the Tauri
+// bridge (gateway.json + credential manager) at startup.
+
+let _url = BUILD_TIME_URL || DEFAULT_URL;
+let _token = isTauriRuntime() ? "" : BUILD_TIME_TOKEN || DEFAULT_TOKEN;
+let _initialized = false;
+
+/** Current gateway base URL. Always use this getter, never the build-time const. */
+export function getGatewayUrl(): string {
+  return _url;
+}
+
+/** @deprecated Use getGatewayUrl() instead. Kept for backward-compat. */
+export const gatewayBaseUrl = _url;
+
+// ── Initialization ──────────────────────────────────────────────────────────
+
+/**
+ * Load gateway URL from the Tauri bridge (gateway.json) and token from
+ * Windows Credential Manager. Safe to call multiple times; first call wins.
+ * Returns the resolved URL for immediate use.
+ */
+export async function initGatewayConfig(): Promise<string> {
+  if (_initialized) return _url;
+  if (isTauriRuntime()) {
+    const { bridge } = await import("./tauri");
+    try {
+      const savedUrl = await bridge.getGatewayUrl();
+      if (savedUrl) _url = savedUrl;
+    } catch {
+      // bridge not available; keep default
+    }
+    try {
+      _token = await bridge.credentialGet(GATEWAY_CREDENTIAL_NAME);
+    } catch {
+      // An installed build never falls back to an embedded token. The user
+      // provisions it once through Settings and it remains in Credential Manager.
+      _token = "";
+    }
+  }
+  _initialized = true;
+  return _url;
+}
+
+/**
+ * Update the runtime gateway URL. Persists to gateway.json via Tauri bridge.
+ */
+export async function setGatewayUrl(url: string): Promise<void> {
+  if (isTauriRuntime()) {
+    const { bridge } = await import("./tauri");
+    await bridge.setGatewayUrl(url);
+  }
+  _url = url;
+}
+
+/** Store the access token in Credential Manager and retain it only in memory. */
+export async function setGatewayToken(token: string): Promise<void> {
+  const normalized = token.trim();
+  if (!normalized) throw new Error("Gateway token cannot be empty");
+  if (isTauriRuntime()) {
+    const { bridge } = await import("./tauri");
+    await bridge.credentialSet(GATEWAY_CREDENTIAL_NAME, normalized);
+  }
+  _token = normalized;
+}
+
+export function hasGatewayToken(): boolean {
+  return _token.length > 0;
+}
 
 function id(value: string): string {
   return encodeURIComponent(value);
@@ -16,8 +90,8 @@ function id(value: string): string {
 
 function safeErrorDetail(value: unknown): string {
   if (typeof value !== "string") return "";
-  return value
-    .replaceAll(token, "[REDACTED]")
+  const redacted = _token ? value.replaceAll(_token, "[REDACTED]") : value;
+  return redacted
     .replace(/Bearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
     .replace(/\s+/g, " ")
@@ -65,12 +139,14 @@ export class GatewayApiError extends Error {
 }
 
 async function fetchGateway(path: string, init: RequestInit = {}): Promise<Response> {
+  await initGatewayConfig();
+  const url = _url;
   try {
-    const response = await fetch(`${baseUrl}${path}`, {
+    const response = await fetch(`${url}${path}`, {
       ...init,
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        ...(_token ? { Authorization: `Bearer ${_token}` } : {}),
         ...init.headers,
       },
     });
@@ -85,7 +161,10 @@ async function fetchGateway(path: string, init: RequestInit = {}): Promise<Respo
     ) {
       throw error;
     }
-    throw new GatewayApiError(0, "Unable to reach the analysis gateway");
+    throw new GatewayApiError(
+      0,
+      `Cannot reach analysis gateway at ${url} — ensure it is running or update the gateway URL in settings`,
+    );
   }
 }
 
@@ -272,9 +351,11 @@ export const gateway = {
       }
     }
   },
-  liveUrl: (sessionId: string) =>
-    `${baseUrl.replace(/^http/, "ws")}/v1/sessions/${id(sessionId)}/live?token=${encodeURIComponent(token)}`,
+  liveUrl: (sessionId: string) => {
+    const base = _url;
+    const wsBase = base.replace(/^http/, "ws");
+    return `${wsBase}/v1/sessions/${id(sessionId)}/live?token=${encodeURIComponent(_token)}`;
+  },
 };
 
 export type { RealtimeEvent };
-

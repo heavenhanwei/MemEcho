@@ -501,3 +501,29 @@ pub fn save_report_files(
     )
     .map_err(|e| e.to_string())
 }
+
+// ── Gateway connectivity ────────────────────────────────────────────────────
+
+/// Check if the analysis gateway is reachable and healthy.
+/// Optionally override the gateway URL; otherwise reads from saved config.
+#[tauri::command]
+pub async fn check_gateway(
+    gateway_url: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<crate::gateway_check::GatewayStatus, String> {
+    let url =
+        gateway_url.unwrap_or_else(|| crate::gateway_check::load_gateway_url(&state.sessions_dir));
+    Ok(crate::gateway_check::check_gateway_health(&url).await)
+}
+
+/// Persist a gateway URL for future sessions.
+#[tauri::command]
+pub fn set_gateway_url(gateway_url: String, state: State<'_, AppState>) -> Result<(), String> {
+    crate::gateway_check::save_gateway_url(&state.sessions_dir, &gateway_url)
+}
+
+/// Return the currently configured gateway URL.
+#[tauri::command]
+pub fn get_gateway_url(state: State<'_, AppState>) -> String {
+    crate::gateway_check::load_gateway_url(&state.sessions_dir)
+}

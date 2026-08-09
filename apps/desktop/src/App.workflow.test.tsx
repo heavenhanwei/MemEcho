@@ -19,6 +19,11 @@ vi.mock("@react-three/drei", () => ({
 }));
 vi.mock("./lib/api", () => ({
   gatewayBaseUrl: "https://gateway.example",
+  getGatewayUrl: () => "https://gateway.example",
+  hasGatewayToken: () => true,
+  setGatewayUrl: vi.fn().mockResolvedValue(undefined),
+  setGatewayToken: vi.fn().mockResolvedValue(undefined),
+  initGatewayConfig: vi.fn().mockResolvedValue("https://gateway.example"),
   gateway: {
     createSession: vi.fn(),
     liveUrl: vi.fn(() => "ws://gateway/live"),
@@ -30,6 +35,7 @@ vi.mock("./lib/api", () => ({
     result: vi.fn(),
     artifacts: vi.fn(),
     chat: vi.fn(),
+    health: vi.fn().mockResolvedValue({ status: "ok", provider: "mock" }),
   },
 }));
 

@@ -20,7 +20,11 @@ import { ReportView } from "./components/ReportView";
 import { RelationsView } from "./components/RelationsView";
 import {
   gateway,
-  gatewayBaseUrl,
+  getGatewayUrl,
+  hasGatewayToken,
+  initGatewayConfig,
+  setGatewayUrl,
+  setGatewayToken,
   type GatewayJob,
   type ParticipantCandidate,
 } from "./lib/api";
@@ -108,6 +112,8 @@ function NowPage() {
   const [canRetry, setCanRetry] = useState(false);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>("offline");
   const [textImportBusy, setTextImportBusy] = useState(false);
+  const [gatewayOk, setGatewayOk] = useState<boolean | null>(null);
+  const [gatewayError, setGatewayError] = useState("");
 
   useEffect(() => {
     if (!isTauri) return;
@@ -123,6 +129,77 @@ function NowPage() {
     return () => {
       cancelled = true;
     };
+  }, [isTauri]);
+
+  // Initialize gateway config from Tauri bridge, then check health
+  useEffect(() => {
+    let cancelled = false;
+    initGatewayConfig()
+      .then(() => {
+        if (cancelled) return;
+        if (isTauri) {
+          bridge
+            .checkGateway()
+            .then((status) => {
+              if (cancelled) return;
+              setGatewayOk(status.ok);
+              if (!status.ok) {
+                setGatewayError(
+                  status.error ?? `Cannot reach analysis gateway at ${status.url}`,
+                );
+              }
+            })
+            .catch(() => {
+              // bridge error — skip
+            });
+        } else {
+          if (typeof gateway.health === "function") {
+            gateway
+              .health()
+              .then(() => {
+                if (!cancelled) setGatewayOk(true);
+              })
+              .catch(() => {
+                if (cancelled) return;
+                setGatewayOk(false);
+                setGatewayError(
+                  `Cannot reach analysis gateway at ${getGatewayUrl()} — ensure it is running`,
+                );
+              });
+          }
+        }
+      })
+      .catch(() => {
+        // init failed — skip health check
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isTauri]);
+
+  const retryGatewayCheck = useCallback(async () => {
+    setGatewayOk(null);
+    setGatewayError("");
+    try {
+      await initGatewayConfig();
+      if (isTauri) {
+        const status = await bridge.checkGateway();
+        setGatewayOk(status.ok);
+        if (!status.ok) {
+          setGatewayError(
+            status.error ?? `Cannot reach analysis gateway at ${status.url}`,
+          );
+        }
+      } else {
+        if (typeof gateway.health === "function") {
+          await gateway.health();
+        }
+        setGatewayOk(true);
+      }
+    } catch {
+      setGatewayOk(false);
+      setGatewayError("Gateway check failed");
+    }
   }, [isTauri]);
 
   useEffect(
@@ -506,7 +583,7 @@ function NowPage() {
         await bridge.uploadSessionTracks(
           context.localSessionId,
           context.gatewaySessionId,
-          gatewayBaseUrl,
+          getGatewayUrl(),
         );
         context.uploaded = true;
       } else if (!context.localSessionId && !context.uploaded) {
@@ -888,6 +965,18 @@ function NowPage() {
           />
         </label>
       </div>
+      {gatewayOk === false && (
+        <div className="error-banner" role="alert">
+          <p>{gatewayError}</p>
+          <button
+            type="button"
+            className="retry-btn"
+            onClick={() => void retryGatewayCheck()}
+          >
+            重试连接
+          </button>
+        </div>
+      )}
       {error && <p className="error-banner">{error}</p>}
     </section>
   );
@@ -1331,11 +1420,155 @@ function RelationsPage() {
 }
 
 function SettingsPage() {
+  const [gwUrl, setGwUrl] = useState("");
+  const [gwDraft, setGwDraft] = useState("");
+  const [gwStatus, setGwStatus] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+  const [gwError, setGwError] = useState("");
+  const [tokenDraft, setTokenDraft] = useState("");
+  const [tokenSaved, setTokenSaved] = useState(false);
+  const [tokenError, setTokenError] = useState("");
+  const isTauri = isTauriRuntime();
+
+  useEffect(() => {
+    initGatewayConfig().then((url) => {
+      setGwUrl(url);
+      setGwDraft(url);
+      setTokenSaved(hasGatewayToken());
+    });
+  }, []);
+
+  const saveToken = useCallback(async () => {
+    setTokenError("");
+    try {
+      await setGatewayToken(tokenDraft);
+      setTokenDraft("");
+      setTokenSaved(true);
+    } catch (cause) {
+      setTokenError(cause instanceof Error ? cause.message : "无法保存访问令牌");
+    }
+  }, [tokenDraft]);
+
+  const testAndSave = useCallback(async () => {
+    setGwStatus("testing");
+    setGwError("");
+    try {
+      // Validate: production must be HTTPS; dev allows localhost HTTP
+      const parsed = new URL(gwDraft);
+      const isLocalhost =
+        parsed.hostname === "localhost" ||
+        parsed.hostname === "127.0.0.1" ||
+        parsed.hostname === "[::1]";
+      if (parsed.protocol === "http:" && !isLocalhost) {
+        setGwStatus("fail");
+        setGwError("HTTP is only allowed for localhost — production requires HTTPS");
+        return;
+      }
+      // Test connectivity
+      if (isTauri) {
+        const result = await bridge.checkGateway(gwDraft);
+        if (result.ok) {
+          await setGatewayUrl(gwDraft);
+          setGwUrl(gwDraft);
+          setGwStatus("ok");
+        } else {
+          setGwStatus("fail");
+          setGwError(result.error ?? "Gateway is not reachable");
+        }
+      } else {
+        // Web mode: try health endpoint directly
+        const resp = await fetch(`${gwDraft}/v1/health`, { signal: AbortSignal.timeout(5000) });
+        if (resp.ok) {
+          await setGatewayUrl(gwDraft);
+          setGwUrl(gwDraft);
+          setGwStatus("ok");
+        } else {
+          setGwStatus("fail");
+          setGwError(`Gateway returned HTTP ${resp.status}`);
+        }
+      }
+    } catch (cause) {
+      setGwStatus("fail");
+      if (cause instanceof TypeError) {
+        setGwError("Invalid URL format");
+      } else {
+        setGwError(cause instanceof Error ? cause.message : "Connection failed");
+      }
+    }
+  }, [gwDraft, isTauri]);
+
   return (
     <section className="settings-page">
       <p className="eyebrow">YOUR SPACE</p>
       <h1>你的声音，首先属于你。</h1>
       <div className="settings-grid">
+        <article>
+          <h2>分析网关</h2>
+          <p>
+            当前地址: <code>{gwUrl || "未配置"}</code>
+          </p>
+          <div className="gateway-config-row">
+            <input
+              type="text"
+              value={gwDraft}
+              onChange={(e) => {
+                setGwDraft(e.target.value);
+                setGwStatus("idle");
+              }}
+              placeholder="https://your-gateway.example.com"
+              className="gateway-url-input"
+            />
+            <button
+              type="button"
+              onClick={() => void testAndSave()}
+              disabled={gwStatus === "testing" || gwDraft === gwUrl}
+            >
+              {gwStatus === "testing" ? "测试中…" : "测试并保存"}
+            </button>
+          </div>
+          {gwStatus === "ok" && <p className="gateway-ok">✓ 连接成功，已保存</p>}
+          {gwStatus === "fail" && (
+            <p className="error-banner">
+              ✗ {gwError}
+              <br />
+              <small>网关地址未更改，仍为: {gwUrl}</small>
+            </p>
+          )}
+          <p className="gateway-hint">
+            本地开发: http://127.0.0.1:8787 · 生产: 必须为 HTTPS 地址
+          </p>
+          {isTauri && (
+            <div className="gateway-token-config">
+              <label htmlFor="gateway-token">访问令牌</label>
+              <div className="gateway-config-row">
+                <input
+                  id="gateway-token"
+                  type="password"
+                  value={tokenDraft}
+                  autoComplete="off"
+                  onChange={(event) => {
+                    setTokenDraft(event.target.value);
+                    setTokenError("");
+                  }}
+                  placeholder={tokenSaved ? "已安全保存；输入新值可替换" : "输入 Gateway 访问令牌"}
+                  className="gateway-url-input"
+                />
+                <button
+                  type="button"
+                  onClick={() => void saveToken()}
+                  disabled={!tokenDraft.trim()}
+                >
+                  安全保存
+                </button>
+              </div>
+              <p className="gateway-hint">
+                {tokenSaved
+                  ? "令牌已保存在 Windows Credential Manager，不会写入项目或配置文件。"
+                  : "尚未配置令牌；分析请求将不可用。"}
+              </p>
+              {tokenError && <p className="error-banner">{tokenError}</p>}
+            </div>
+          )}
+        </article>
         <article>
           <h2>数据位置</h2>
           <p>原始录音、报告和记忆保存在本机。云端临时副本分析后删除。</p>

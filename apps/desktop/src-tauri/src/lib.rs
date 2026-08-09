@@ -3,6 +3,7 @@ mod commands;
 pub mod credential;
 pub mod db;
 pub mod evidence;
+pub mod gateway_check;
 pub mod importer;
 mod paths;
 mod recovery;
@@ -59,6 +60,9 @@ pub fn run() {
             commands::import_text_content,
             commands::upload_session_tracks,
             commands::save_report_files,
+            commands::check_gateway,
+            commands::set_gateway_url,
+            commands::get_gateway_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running memEcho");
