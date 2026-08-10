@@ -44,11 +44,18 @@ vi.mock("./lib/api", () => ({
       session_id: "session-1",
       updated_at: "2026-01-01T00:00:00Z",
       tracks: [],
-      aligned_segment_count: 0,
-      submitted_to_qwen: false,
-      qwen_status: "queued",
+      aligned_segment_count: 1,
+      submitted_to_qwen: true,
+      qwen_status: "succeeded",
       qwen_error_code: null,
-      transcript_segments: [],
+      transcript_segments: [
+        {
+          speaker_id: "speaker_self",
+          start_ms: 12000,
+          end_ms: 18000,
+          text: "正式转写片段",
+        },
+      ],
       transcript_truncated: false,
     }),
     chat: vi.fn(),
@@ -289,6 +296,13 @@ describe("desktop analysis workflow", () => {
       markdown: "# Report",
       html: "<h1>Report</h1>",
     });
+    const savedArgs = saved?.args as { analysisJson?: string };
+    const persisted = JSON.parse(savedArgs.analysisJson ?? "{}") as {
+      _official_transcript?: { segments: { text: string }[] };
+    };
+    expect(persisted._official_transcript?.segments.map((segment) => segment.text)).toEqual([
+      "正式转写片段",
+    ]);
   });
 
   it("pauses for identity and resumes the same job after user confirmation", async () => {

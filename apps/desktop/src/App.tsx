@@ -32,9 +32,11 @@ import {
 } from "./lib/api";
 import { startLivePcmCapture, type LivePcmCapture } from "./lib/livePcm";
 import {
-  clearPendingChunks,
-  loadPendingChunks,
+  clearRecordingChunks,
+  listRecoverableRecordings,
+  loadRecordingChunks,
   persistRecordingChunk,
+  type RecoverableRecording,
 } from "./lib/chunkStore";
 import {
   bridge,
@@ -153,6 +155,7 @@ function NowPage() {
   const liveCapture = useRef<LivePcmCapture | null>(null);
   const browserCaptureStop = useRef<(() => Promise<void>) | null>(null);
   const webChunkIndex = useRef(0);
+  const webRecordingId = useRef<string | null>(null);
   const recordingActive = useRef(false);
   const liveSessionId = useRef<string | null>(null);
   const liveRetryTimer = useRef<number | undefined>(undefined);
@@ -182,7 +185,9 @@ function NowPage() {
   const [gatewayProvider, setGatewayProvider] = useState("");
   const [processingDetails, setProcessingDetails] =
     useState<ProcessingDetails | null>(null);
-  const [recoveredChunks, setRecoveredChunks] = useState<Blob[] | null>(null);
+  const [recoveredRecordings, setRecoveredRecordings] = useState<
+    RecoverableRecording[]
+  >([]);
   const canCaptureBrowserAudio =
     !isTauri && typeof navigator.mediaDevices?.getDisplayMedia === "function";
 
@@ -278,9 +283,9 @@ function NowPage() {
   useEffect(() => {
     if (isTauri) return;
     let cancelled = false;
-    loadPendingChunks()
-      .then((chunks) => {
-        if (!cancelled && chunks.length > 0) setRecoveredChunks(chunks);
+    listRecoverableRecordings()
+      .then((recordings) => {
+        if (!cancelled) setRecoveredRecordings(recordings);
       })
       .catch(() => {
         // Persistence is best-effort; never block the page on it.
@@ -290,20 +295,27 @@ function NowPage() {
     };
   }, [isTauri]);
 
-  function downloadRecoveredChunks() {
-    if (!recoveredChunks || recoveredChunks.length === 0) return;
-    const blob = new Blob(recoveredChunks, { type: "audio/webm" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "memecho-recovered.webm";
-    anchor.click();
-    URL.revokeObjectURL(url);
+  async function downloadRecoveredRecording(recording: RecoverableRecording) {
+    try {
+      const chunks = await loadRecordingChunks(recording.recordingId);
+      if (chunks.length === 0) return;
+      const blob = new Blob(chunks, { type: "audio/webm" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `memecho-recovered-${recording.recordingId}.webm`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // Best-effort download; the recording stays listed for another attempt.
+    }
   }
 
-  async function discardRecoveredChunks() {
-    await clearPendingChunks().catch(() => undefined);
-    setRecoveredChunks(null);
+  async function discardRecoveredRecording(recording: RecoverableRecording) {
+    await clearRecordingChunks(recording.recordingId).catch(() => undefined);
+    setRecoveredRecordings((current) =>
+      current.filter((item) => item.recordingId !== recording.recordingId),
+    );
   }
 
   const retryGatewayCheck = useCallback(async () => {
@@ -547,13 +559,19 @@ function NowPage() {
         browserCaptureStop.current = browserCapture.stop;
         browserRecordingChunks.current = [];
         webChunkIndex.current = 0;
+        webRecordingId.current = `rec-${session.id}`;
         recorder.current = new MediaRecorder(browserCapture.media);
         recorder.current.ondataavailable = (event) => {
           if (event.data.size > 0) {
             browserRecordingChunks.current.push(event.data);
             const chunkIndex = webChunkIndex.current;
             webChunkIndex.current += 1;
-            void persistRecordingChunk(chunkIndex, event.data).catch(() => undefined);
+            const recordingId = webRecordingId.current;
+            if (recordingId) {
+              void persistRecordingChunk(recordingId, chunkIndex, event.data).catch(
+                () => undefined,
+              );
+            }
           }
         };
         recorder.current.start(1000);
@@ -677,12 +695,21 @@ function NowPage() {
     state.patch({ stageLabel: "正在读取分析结果与报告文件", progress: 96 });
     const result = await gateway.result(context.gatewaySessionId);
     const artifacts = await gateway.artifacts(context.gatewaySessionId);
+    try {
+      const details = await gateway.processingDetails(context.gatewaySessionId);
+      (result as unknown as Record<string, unknown>)["_official_transcript"] = {
+        segments: details.transcript_segments,
+        truncated: details.transcript_truncated,
+      };
+    } catch {
+      // Observability data is best-effort; the report itself stays intact.
+    }
 
     if (context.localSessionId) {
       state.patch({ stageLabel: "正在安全保存本地报告", progress: 98 });
       await bridge.saveReportFiles(
         context.localSessionId,
-        artifacts.contents.json || JSON.stringify(result),
+        JSON.stringify(result),
         artifacts.contents.markdown,
         artifacts.contents.html,
       );
@@ -739,8 +766,14 @@ function NowPage() {
         );
         context.uploaded = true;
         context.webRecording = undefined;
-        void clearPendingChunks().catch(() => undefined);
-        setRecoveredChunks(null);
+        const recordingId = webRecordingId.current;
+        webRecordingId.current = null;
+        if (recordingId) {
+          void clearRecordingChunks(recordingId)
+            .then(() => listRecoverableRecordings())
+            .then((recordings) => setRecoveredRecordings(recordings))
+            .catch(() => undefined);
+        }
       } else if (!context.localSessionId && !context.uploaded) {
         throw new Error("浏览器录音不可用，请重新录制");
       }
@@ -1156,26 +1189,33 @@ function NowPage() {
         </label>
       </div>
       {!isTauri &&
-        recoveredChunks &&
-        recoveredChunks.length > 0 &&
+        recoveredRecordings.length > 0 &&
         state.soulState === "idle" && (
           <div className="chunk-recovery-banner" role="status">
-            <p>
-              检测到上次未上传完成的浏览器录音缓存（{recoveredChunks.length}{" "}
-              个分块）。可以下载保存，或清除缓存。
-            </p>
-            <div className="recovery-actions">
-              <button type="button" onClick={downloadRecoveredChunks}>
-                下载缓存录音
-              </button>
-              <button
-                type="button"
-                className="danger"
-                onClick={() => void discardRecoveredChunks()}
-              >
-                清除
-              </button>
-            </div>
+            <p>检测到未上传完成的浏览器录音缓存，可分别下载保存或清除：</p>
+            {recoveredRecordings.map((recording) => (
+              <div key={recording.recordingId} className="recovery-row">
+                <span>
+                  {recording.recordingId} · {recording.chunkCount} 个分块 ·{" "}
+                  {(recording.totalBytes / 1024 / 1024).toFixed(1)} MB
+                </span>
+                <div className="recovery-actions">
+                  <button
+                    type="button"
+                    onClick={() => void downloadRecoveredRecording(recording)}
+                  >
+                    下载
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => void discardRecoveredRecording(recording)}
+                  >
+                    清除
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       {gatewayOk === false && (

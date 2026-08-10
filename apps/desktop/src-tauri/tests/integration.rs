@@ -1089,4 +1089,91 @@ mod integration_tests {
 
         std::fs::remove_dir_all(&sessions_dir).ok();
     }
+
+    // ── Official transcript persistence (BUG-007 P1-1) ─────────────────────
+
+    const TRANSCRIPT_JSON: &str = r#"{
+        "schema_version": "1.1",
+        "request_id": "req_embed",
+        "_official_transcript": {
+            "segments": [
+                {"speaker_id": "speaker_self", "start_ms": 12000, "end_ms": 18000, "text": "先确认今天讨论的范围"}
+            ],
+            "truncated": false
+        }
+    }"#;
+
+    #[test]
+    fn test_report_json_persists_embedded_official_transcript() {
+        let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let db = setup_db(&sessions_dir);
+        let session_id = format!("test-{}", unique_id());
+
+        db.create_session(&session_id, Some("Transcript"), None, None, 16000, None)
+            .unwrap();
+        make_test_session(&sessions_dir, &session_id);
+
+        let saved = memecho_desktop_lib::report::save_report_files_impl(
+            &session_id,
+            TRANSCRIPT_JSON,
+            "# Report",
+            "<h1>Report</h1>",
+            &sessions_dir,
+            &db,
+        )
+        .unwrap();
+
+        // The file artifact keeps the transcript so historical reopens work
+        // without any gateway state.
+        let on_disk = std::fs::read_to_string(&saved.json_path).unwrap();
+        assert!(on_disk.contains("先确认今天讨论的范围"));
+        assert!(on_disk.contains("_official_transcript"));
+
+        // The DB bundle used by historical report listing keeps it too.
+        let bundle = db.get_analysis_results(&session_id).unwrap();
+        let report = bundle
+            .results
+            .iter()
+            .find(|item| item.analysis_type == "report")
+            .expect("report result saved");
+        assert!(report.content_json.contains("先确认今天讨论的范围"));
+
+        std::fs::remove_dir_all(&sessions_dir).ok();
+    }
+
+    #[test]
+    fn test_session_deletion_removes_persisted_official_transcript() {
+        let sessions_dir = std::env::temp_dir().join(format!("memecho_test_{}", unique_id()));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let db = setup_db(&sessions_dir);
+        let session_id = format!("test-{}", unique_id());
+
+        db.create_session(&session_id, Some("Delete me"), None, None, 16000, None)
+            .unwrap();
+        make_test_session(&sessions_dir, &session_id);
+
+        memecho_desktop_lib::report::save_report_files_impl(
+            &session_id,
+            TRANSCRIPT_JSON,
+            "# Report",
+            "<h1>Report</h1>",
+            &sessions_dir,
+            &db,
+        )
+        .unwrap();
+
+        // Mirror delete_local_session: cascade DB records, then remove files.
+        db.cascade_delete_session(&session_id, &sessions_dir).unwrap();
+        let session_dir = sessions_dir.join(&session_id);
+        std::fs::remove_dir_all(&session_dir).unwrap();
+
+        assert!(!session_dir.join("report.json").exists());
+        assert!(!session_dir.join("mic.wav").exists());
+        let bundle = db.get_analysis_results(&session_id).unwrap();
+        assert!(bundle.results.is_empty());
+        assert!(bundle.memory_candidates.is_empty());
+
+        std::fs::remove_dir_all(&sessions_dir).ok();
+    }
 }

@@ -1,5 +1,37 @@
-import { useEffect, useState } from "react";
+import type { AnalysisResult } from "@memecho/contracts";
+import { useEffect, useMemo, useState } from "react";
 import { gateway, type TranscriptSnippet } from "../lib/api";
+
+export interface OfficialTranscriptEmbed {
+  segments: TranscriptSnippet[];
+  truncated: boolean;
+}
+
+/** Read the bounded official transcript persisted with the report JSON. */
+export function readEmbeddedTranscript(
+  result: AnalysisResult | null | undefined,
+): OfficialTranscriptEmbed | null {
+  const embedded = (result as unknown as Record<string, unknown> | null)?.[
+    "_official_transcript"
+  ];
+  if (!embedded || typeof embedded !== "object") return null;
+  const candidate = embedded as { segments?: unknown; truncated?: unknown };
+  if (!Array.isArray(candidate.segments)) return null;
+  const segments: TranscriptSnippet[] = [];
+  for (const item of candidate.segments) {
+    if (!item || typeof item !== "object") continue;
+    const segment = item as Partial<TranscriptSnippet>;
+    if (typeof segment.text !== "string") continue;
+    segments.push({
+      speaker_id:
+        typeof segment.speaker_id === "string" ? segment.speaker_id : "unknown",
+      start_ms: Number.isFinite(segment.start_ms) ? Number(segment.start_ms) : 0,
+      end_ms: Number.isFinite(segment.end_ms) ? Number(segment.end_ms) : 0,
+      text: segment.text.slice(0, 600),
+    });
+  }
+  return { segments, truncated: candidate.truncated === true };
+}
 
 function formatClock(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -9,17 +41,28 @@ function formatClock(ms: number): string {
 }
 
 export function OfficialTranscript({
+  result,
   sessionId,
   speakerNames,
 }: {
+  result: AnalysisResult;
   sessionId: string | null;
   speakerNames: Map<string, string>;
 }) {
+  const embedded = useMemo(() => readEmbeddedTranscript(result), [result]);
   const [segments, setSegments] = useState<TranscriptSnippet[] | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    // The report-persisted transcript is authoritative: it survives gateway
+    // restarts and works when reopening historical reports offline.
+    if (embedded) {
+      setSegments(embedded.segments);
+      setTruncated(embedded.truncated);
+      setError("");
+      return;
+    }
     if (!sessionId) {
       setSegments(null);
       return;
@@ -36,12 +79,12 @@ export function OfficialTranscript({
       .catch(() => {
         if (cancelled) return;
         setSegments(null);
-        setError("正式转写不可用：网关未保留该会话的处理状态。");
+        setError("正式转写不可用：该报告未保存正式转写，且网关未保留会话处理状态。");
       });
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, embedded]);
 
   return (
     <details className="glass-card span-two official-transcript">

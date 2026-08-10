@@ -326,3 +326,29 @@ def test_processing_details_endpoint_is_authenticated_and_sanitized(
     assert "mock-oss.example.com" not in serialized
     assert "expires=" not in serialized
     assert "Bearer" not in serialized
+
+
+def test_transcript_contract_stays_bounded_for_local_persistence():
+    session = SimpleNamespace(id="ses_big", processing={})
+    oversized_text = "长" * 900
+    for index in range(processing_details.TRANSCRIPT_SEGMENT_LIMIT + 50):
+        processing_details.add_transcript(
+            session,
+            [
+                {
+                    "speaker_id": "speaker_self",
+                    "start_ms": index,
+                    "end_ms": index + 1,
+                    "text": oversized_text,
+                }
+            ],
+        )
+
+    details = processing_details.build_response(session)
+
+    assert len(details.transcript_segments) == processing_details.TRANSCRIPT_SEGMENT_LIMIT
+    assert details.transcript_truncated is True
+    assert all(
+        len(snippet.text) <= processing_details.TRANSCRIPT_TEXT_LIMIT
+        for snippet in details.transcript_segments
+    )

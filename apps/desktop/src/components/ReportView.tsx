@@ -337,6 +337,7 @@ export function ReportView({
           </div>
         </article>
         <OfficialTranscript
+          result={result}
           sessionId={gatewaySessionId}
           speakerNames={participantNames}
         />
