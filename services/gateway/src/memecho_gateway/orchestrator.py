@@ -9,7 +9,7 @@ from typing import Any
 from . import media_cleanup, processing_details
 from .alignment import align_intervals
 from .contracts import validate_result
-from .models import JobStatus, ProcessingStage
+from .models import FileTransPhase, JobStatus, ProcessingStage
 from .providers.oss import make_oss_key
 from .quality import compute_quality_metrics, conservative_evidence_weights
 from .rendering import render_html, render_markdown
@@ -86,6 +86,48 @@ class Orchestrator:
             )
         return value, None, elapsed_ms
 
+    async def _download_transcription_with_phase(
+        self,
+        audio_url: str,
+        session: Any | None,
+        upload_id: str | None,
+    ) -> dict[str, Any]:
+        """Download transcription with real-time phase tracking."""
+        has_tracking = (
+            session is not None
+            and upload_id is not None
+            and hasattr(self.transcription, "download_with_phase")
+        )
+        if not has_tracking:
+            return await self.transcription.download(audio_url)
+
+        def on_phase(phase_name: str, **kwargs: Any) -> None:
+            try:
+                phase = FileTransPhase(phase_name)
+            except ValueError:
+                return
+            # Extract stats that belong in a separate call.
+            sentence_count = kwargs.pop("sentence_count", None)
+            language = kwargs.pop("language", None)
+            audio_duration_ms = kwargs.pop("audio_duration_ms", None)
+            processing_details.set_filetrans_phase(
+                session, upload_id, phase, **kwargs  # type: ignore[arg-type]
+            )
+            if phase == FileTransPhase.succeeded and sentence_count is not None:
+                processing_details.set_filetrans_stats(
+                    session,
+                    upload_id,
+                    sentence_count=sentence_count,
+                    language=language,
+                    audio_duration_ms=audio_duration_ms,
+                )
+                # The transcript segments will be added by the caller
+                # after download_with_phase returns.
+
+        return await self.transcription.download_with_phase(
+            audio_url, on_phase=on_phase,
+        )
+
     async def _collect_remote_observations(
         self,
         audio_url: str,
@@ -97,7 +139,9 @@ class Orchestrator:
             calls["fun_asr"] = self.dashscope.submit_fun_asr(audio_url)
             calls["emotion"] = self.dashscope.submit_emotion(audio_url)
         if self.transcription:
-            calls["transcription"] = self.transcription.download(audio_url)
+            calls["transcription"] = self._download_transcription_with_phase(
+                audio_url, session, upload_id,
+            )
         if not calls:
             return {
                 "diarization": [],
@@ -130,6 +174,19 @@ class Orchestrator:
                 collected["errors"].append(
                     {"source": name, "error_code": type(exc).__name__}
                 )
+                if name == "transcription" and session is not None and upload_id is not None:
+                    error_phase = (
+                        FileTransPhase.timed_out
+                        if isinstance(exc, TimeoutError | asyncio.TimeoutError)
+                        else FileTransPhase.failed
+                    )
+                    processing_details.set_filetrans_phase(
+                        session,
+                        upload_id,
+                        error_phase,
+                        error_code=processing_details.safe_error_code(exc),
+                        retryable=True,
+                    )
             elif name == "fun_asr":
                 collected["diarization"] = value.get("output", {}).get("results", [])
             elif name == "emotion":

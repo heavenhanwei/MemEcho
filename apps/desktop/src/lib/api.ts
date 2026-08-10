@@ -245,6 +245,17 @@ export type ProcessingStage =
   | "failed"
   | "skipped";
 
+export type FileTransPhase =
+  | "not_started"
+  | "submitting"
+  | "queued"
+  | "polling"
+  | "downloading"
+  | "normalizing"
+  | "succeeded"
+  | "failed"
+  | "timed_out";
+
 export interface ProcessingModuleDetails {
   status: ProcessingStage;
   error_code?: string | null;
@@ -252,6 +263,12 @@ export interface ProcessingModuleDetails {
 }
 
 export interface FileTransProcessingDetails extends ProcessingModuleDetails {
+  phase: FileTransPhase;
+  poll_attempts: number;
+  next_poll_after_ms?: number | null;
+  last_polled_at?: string | null;
+  retryable: boolean;
+  task_reference?: string | null;
   sentence_count?: number | null;
   language?: string | null;
   audio_duration_ms?: number | null;

@@ -18,8 +18,9 @@ from fastapi.testclient import TestClient
 from memecho_gateway import processing_details
 from memecho_gateway.config import get_settings
 from memecho_gateway.main import app, store
-from memecho_gateway.models import SessionCreate
+from memecho_gateway.models import FileTransPhase, SessionCreate
 from memecho_gateway.orchestrator import Orchestrator
+from memecho_gateway.providers.dashscope import DashScopeClient
 from memecho_gateway.providers.mock import MockProvider
 from memecho_gateway.store import MemoryStore, UploadRecord
 
@@ -86,6 +87,13 @@ class FailingTranscription:
     async def download(self, _url):
         raise RuntimeError("vendor payload exploded with secret details")
 
+    async def download_with_phase(self, _url, *, on_phase=None):
+        if on_phase:
+            on_phase("submitting")
+            on_phase("queued", task_reference="ft_***mock01")
+            on_phase("polling", poll_attempts=1, next_poll_after_ms=2000, elapsed_ms=200)
+        raise RuntimeError("vendor payload exploded with secret details")
+
 
 class SucceedingTranscription:
     async def download(self, _url):
@@ -94,6 +102,27 @@ class SucceedingTranscription:
             "language": "zh",
             "duration_ms": 24000,
         }
+
+    async def download_with_phase(self, _url, *, on_phase=None):
+        result = {
+            "transcript": canonical_segments(),
+            "language": "zh",
+            "duration_ms": 24000,
+        }
+        if on_phase:
+            on_phase("submitting")
+            on_phase("queued", task_reference="ft_***mock01")
+            on_phase("polling", poll_attempts=1, next_poll_after_ms=2000, elapsed_ms=200)
+            on_phase("downloading", elapsed_ms=1200)
+            on_phase("normalizing", elapsed_ms=1400)
+            on_phase(
+                "succeeded",
+                elapsed_ms=1600,
+                sentence_count=len(result["transcript"]),
+                language=result["language"],
+                audio_duration_ms=result["duration_ms"],
+            )
+        return result
 
 
 class CapturingProvider(MockProvider):
@@ -171,9 +200,13 @@ async def test_filetrans_text_reaches_qwen_provider_input(tmp_path):
     assert details.qwen_status.value == "succeeded"
     track = details.tracks[0]
     assert track.filetrans.status.value == "succeeded"
+    assert track.filetrans.phase == FileTransPhase.succeeded
     assert track.filetrans.sentence_count == len(CANONICAL_TEXTS)
     assert track.filetrans.language == "zh"
     assert track.filetrans.audio_duration_ms == 24000
+    assert track.filetrans.poll_attempts >= 1
+    assert track.filetrans.retryable is False
+    assert track.filetrans.task_reference is not None
     assert track.modules["fun_asr"].status.value == "succeeded"
     assert track.modules["emotion"].status.value == "succeeded"
     assert track.modules["transcription"].status.value == "succeeded"
@@ -203,7 +236,9 @@ async def test_filetrans_failure_reports_module_and_safe_code(tmp_path):
     details = processing_details.build_response(session)
     track = details.tracks[0]
     assert track.filetrans.status.value == "failed"
+    assert track.filetrans.phase == FileTransPhase.failed
     assert track.filetrans.error_code == "upstream_task_failed"
+    assert track.filetrans.retryable is True
     assert track.filetrans.sentence_count is None
     assert details.aligned_segment_count == 0
     assert details.transcript_segments == []
@@ -353,3 +388,132 @@ def test_transcript_contract_stays_bounded_for_local_persistence():
         len(snippet.text) <= processing_details.TRANSCRIPT_TEXT_LIMIT
         for snippet in details.transcript_segments
     )
+
+
+# ---------------------------------------------------------------------------
+# FileTrans phase tracking tests
+# ---------------------------------------------------------------------------
+
+
+def test_filetrans_phase_defaults_to_not_started():
+    session = SimpleNamespace(id="ses_phase", processing={})
+    upload = SimpleNamespace(
+        id="upl_p1", file_name="a.wav", track="mixed",
+        mime_type="audio/wav", size=1024, chunks=set(),
+    )
+    processing_details.upsert_track(session, upload)
+    details = processing_details.build_response(session)
+    ft = details.tracks[0].filetrans
+    assert ft.phase == FileTransPhase.not_started
+    assert ft.status.value == "queued"
+    assert ft.poll_attempts == 0
+    assert ft.next_poll_after_ms is None
+    assert ft.last_polled_at is None
+    assert ft.retryable is False
+    assert ft.task_reference is None
+
+
+def test_set_filetrans_phase_transitions_status():
+    session = SimpleNamespace(id="ses_phase2", processing={})
+    upload = SimpleNamespace(
+        id="upl_p2", file_name="b.wav", track="microphone",
+        mime_type="audio/wav", size=2048, chunks=set(),
+    )
+    processing_details.upsert_track(session, upload)
+
+    processing_details.set_filetrans_phase(
+        session, "upl_p2", FileTransPhase.submitting,
+    )
+    details = processing_details.build_response(session)
+    assert details.tracks[0].filetrans.phase == FileTransPhase.submitting
+    assert details.tracks[0].filetrans.status.value == "running"
+
+    processing_details.set_filetrans_phase(
+        session, "upl_p2", FileTransPhase.polling,
+        poll_attempts=3,
+        next_poll_after_ms=3000,
+        elapsed_ms=7000,
+        task_reference="ft_***abc123",
+    )
+    details = processing_details.build_response(session)
+    ft = details.tracks[0].filetrans
+    assert ft.phase == FileTransPhase.polling
+    assert ft.status.value == "running"
+    assert ft.poll_attempts == 3
+    assert ft.next_poll_after_ms == 3000
+    assert ft.elapsed_ms == 7000
+    assert ft.task_reference == "ft_***abc123"
+
+
+def test_set_filetrans_phase_timed_out_maps_to_failed_status():
+    session = SimpleNamespace(id="ses_to", processing={})
+    upload = SimpleNamespace(
+        id="upl_to", file_name="c.wav", track="mixed",
+        mime_type="audio/wav", size=512, chunks=set(),
+    )
+    processing_details.upsert_track(session, upload)
+    processing_details.set_filetrans_phase(
+        session, "upl_to", FileTransPhase.timed_out,
+        error_code="upstream_timeout", retryable=True,
+    )
+    details = processing_details.build_response(session)
+    ft = details.tracks[0].filetrans
+    assert ft.phase == FileTransPhase.timed_out
+    assert ft.status.value == "failed"
+    assert ft.error_code == "upstream_timeout"
+    assert ft.retryable is True
+
+
+def test_set_filetrans_poll_attempt_records_timestamp():
+    session = SimpleNamespace(id="ses_poll", processing={})
+    upload = SimpleNamespace(
+        id="upl_poll", file_name="d.wav", track="mixed",
+        mime_type="audio/wav", size=512, chunks=set(),
+    )
+    processing_details.upsert_track(session, upload)
+    processing_details.set_filetrans_poll_attempt(
+        session, "upl_poll",
+        attempt=5, next_poll_after_ms=5000, elapsed_ms=12000,
+    )
+    details = processing_details.build_response(session)
+    ft = details.tracks[0].filetrans
+    assert ft.phase == FileTransPhase.polling
+    assert ft.poll_attempts == 5
+    assert ft.next_poll_after_ms == 5000
+    assert ft.last_polled_at is not None
+
+
+def test_sanitize_task_id():
+    assert DashScopeClient.sanitize_task_id("task_abc123def456") == "ft_***def456"
+    assert DashScopeClient.sanitize_task_id("short") == "ft_***short"
+    assert DashScopeClient.sanitize_task_id("12345678") == "ft_***12345678"
+    assert DashScopeClient.sanitize_task_id("123456789") == "ft_***456789"
+
+
+def test_filetrans_details_serialization_includes_phase():
+    """Verify the JSON contract includes all new phase fields."""
+    session = SimpleNamespace(id="ses_ser", processing={})
+    upload = SimpleNamespace(
+        id="upl_ser", file_name="e.wav", track="mixed",
+        mime_type="audio/wav", size=512, chunks=set(),
+    )
+    processing_details.upsert_track(session, upload)
+    processing_details.set_filetrans_phase(
+        session, "upl_ser", FileTransPhase.succeeded,
+        poll_attempts=7, elapsed_ms=8400,
+        task_reference="ft_***xyz789",
+    )
+    processing_details.set_filetrans_stats(
+        session, "upl_ser",
+        sentence_count=42, language="zh", audio_duration_ms=62000,
+    )
+    details = processing_details.build_response(session)
+    payload = details.model_dump(mode="json")
+    ft = payload["tracks"][0]["filetrans"]
+    assert ft["phase"] == "succeeded"
+    assert ft["poll_attempts"] == 7
+    assert ft["task_reference"] == "ft_***xyz789"
+    assert ft["retryable"] is False
+    assert ft["sentence_count"] == 42
+    # status must be backward-compatible
+    assert ft["status"] == "succeeded"

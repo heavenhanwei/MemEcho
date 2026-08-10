@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import httpx
 
 from ..config import Settings
-from .dashscope import DashScopeClient
+from .dashscope import DashScopeClient, PhaseCallback
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +34,65 @@ class TranscriptionDownloader:
                 resp.raise_for_status()
                 return self._normalize_result(resp.json())
         raise RuntimeError("transcription task returned no result URL")
+
+    async def download_with_phase(
+        self,
+        url: str,
+        *,
+        on_phase: PhaseCallback | None = None,
+    ) -> dict[str, Any]:
+        """Download transcription with phase callbacks for real-time tracking."""
+        if self.mock:
+            return self._mock_transcription(url)
+
+        if on_phase:
+            on_phase("submitting")
+        t0 = time.monotonic()
+        task_id = await self.dashscope.submit_transcription_task(url)
+
+        if on_phase:
+            on_phase("queued", task_reference=DashScopeClient.sanitize_task_id(task_id))
+
+        task_result = await self.dashscope.poll_task_result(
+            task_id, on_phase=on_phase, start_time=t0,
+        )
+        results = task_result.get("output", {}).get("results", [])
+
+        if on_phase:
+            on_phase("downloading", elapsed_ms=int((time.monotonic() - t0) * 1000))
+
+        for item in results:
+            if item.get("subtask_status") == "FAILED":
+                if on_phase:
+                    on_phase("failed", error_code="upstream_task_failed")
+                raise RuntimeError(str(item.get("code") or "transcription task failed"))
+            transcription_url = item.get("transcription_url")
+            if not transcription_url:
+                continue
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.get(transcription_url)
+                resp.raise_for_status()
+                raw = resp.json()
+
+        if on_phase:
+            on_phase("normalizing", elapsed_ms=int((time.monotonic() - t0) * 1000))
+
+        normalized = self._normalize_result(raw)
+        sentence_count = len(normalized.get("transcript", []))
+        if sentence_count == 0:
+            if on_phase:
+                on_phase("failed", error_code="invalid_upstream_result")
+            raise ValueError("transcription produced no usable sentences")
+
+        if on_phase:
+            on_phase(
+                "succeeded",
+                elapsed_ms=int((time.monotonic() - t0) * 1000),
+                sentence_count=sentence_count,
+                language=normalized.get("language"),
+                audio_duration_ms=normalized.get("duration_ms"),
+            )
+        return normalized
 
     @staticmethod
     def _normalize_result(data: dict[str, Any]) -> dict[str, Any]:

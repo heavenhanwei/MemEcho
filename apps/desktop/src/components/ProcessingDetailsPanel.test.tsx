@@ -31,6 +31,12 @@ function baseDetails(overrides: Partial<ProcessingDetails> = {}): ProcessingDeta
         },
         filetrans: {
           status: "succeeded",
+          phase: "succeeded",
+          poll_attempts: 5,
+          next_poll_after_ms: null,
+          last_polled_at: "2026-08-08T10:00:05Z",
+          retryable: false,
+          task_reference: "ft_***abc123",
           error_code: null,
           elapsed_ms: 3000,
           sentence_count: 438,
@@ -65,7 +71,7 @@ describe("ProcessingDetailsPanel", () => {
     expect(screen.getByText("Gateway 上传 · mixed")).toBeInTheDocument();
     expect(screen.getByText("3/3 分块 · 1.0 KB")).toBeInTheDocument();
     expect(screen.getByText("FileTrans 正式转写")).toBeInTheDocument();
-    expect(screen.getByText("438 句 · 37.8 秒 · 耗时 3.0 秒")).toBeInTheDocument();
+    expect(screen.getByText("438 句 · 00:37 · 耗时 3.0 秒")).toBeInTheDocument();
     expect(screen.getByText("421 个片段")).toBeInTheDocument();
     expect(screen.getByText("已接收 421 个片段")).toBeInTheDocument();
   });
@@ -77,6 +83,12 @@ describe("ProcessingDetailsPanel", () => {
     });
     details.tracks[0].filetrans = {
       status: "failed",
+      phase: "failed",
+      poll_attempts: 0,
+      next_poll_after_ms: null,
+      last_polled_at: null,
+      retryable: true,
+      task_reference: null,
       error_code: "upstream_task_failed",
       elapsed_ms: 800,
       sentence_count: null,
@@ -94,15 +106,13 @@ describe("ProcessingDetailsPanel", () => {
     details.tracks[0].upload_status = "failed";
     details.tracks[0].oss_status = "queued";
     details.tracks[0].filetrans.status = "queued";
+    details.tracks[0].filetrans.phase = "not_started";
     details.tracks[0].modules["transcription"].status = "queued";
     render(<ProcessingDetailsPanel details={details} />);
-    // Upload row shows failed
     const uploadRow = screen.getByText("Gateway 上传 · mixed").closest(".processing-detail-row");
     expect(uploadRow).toHaveClass("stage-failed");
-    // OSS row shows queued
     const ossRow = screen.getByText("OSS 临时媒体").closest(".processing-detail-row");
     expect(ossRow).toHaveClass("stage-queued");
-    // FileTrans shows queued (not failed)
     const ftRow = screen.getByText("FileTrans 正式转写").closest(".processing-detail-row");
     expect(ftRow).toHaveClass("stage-queued");
   });
@@ -133,5 +143,112 @@ describe("ProcessingDetailsPanel", () => {
     const emotionRow = screen.getByText("情绪识别").closest(".processing-detail-row");
     expect(emotionRow).toHaveClass("stage-failed");
     expect(emotionRow).toHaveTextContent("upstream_timeout");
+  });
+
+  it("shows polling phase with query count and elapsed time", () => {
+    const details = baseDetails();
+    details.tracks[0].filetrans = {
+      status: "running",
+      phase: "polling",
+      poll_attempts: 4,
+      next_poll_after_ms: 2000,
+      last_polled_at: "2026-08-08T10:00:08Z",
+      retryable: false,
+      task_reference: "ft_***def456",
+      error_code: null,
+      elapsed_ms: 8400,
+      sentence_count: null,
+      language: null,
+      audio_duration_ms: null,
+    };
+    render(<ProcessingDetailsPanel details={details} />);
+    const ftRow = screen.getByText("FileTrans 正式转写").closest(".processing-detail-row");
+    expect(ftRow).toHaveClass("stage-running");
+    expect(ftRow).toHaveTextContent("第 4 次查询");
+    expect(ftRow).toHaveTextContent("8.4 秒");
+    expect(screen.getByText("任务标识：ft_***def456")).toBeInTheDocument();
+  });
+
+  it("shows timed_out phase with retry hint", () => {
+    const details = baseDetails({
+      aligned_segment_count: 0,
+      submitted_to_qwen: false,
+    });
+    details.tracks[0].filetrans = {
+      status: "failed",
+      phase: "timed_out",
+      poll_attempts: 50,
+      next_poll_after_ms: null,
+      last_polled_at: null,
+      retryable: true,
+      task_reference: "ft_***timeout",
+      error_code: "upstream_timeout",
+      elapsed_ms: 300000,
+      sentence_count: null,
+      language: null,
+      audio_duration_ms: null,
+    };
+    render(<ProcessingDetailsPanel details={details} />);
+    expect(
+      screen.getByText("FileTrans 等待超时（upstream_timeout）。录音已安全保存，可重试正式转写，不需要重新录音。"),
+    ).toBeInTheDocument();
+    const ftRow = screen.getByText("FileTrans 正式转写").closest(".processing-detail-row");
+    expect(ftRow).toHaveTextContent("upstream_timeout");
+  });
+
+  it("shows submitting phase label", () => {
+    const details = baseDetails();
+    details.tracks[0].filetrans = {
+      status: "running",
+      phase: "submitting",
+      poll_attempts: 0,
+      next_poll_after_ms: null,
+      last_polled_at: null,
+      retryable: false,
+      task_reference: null,
+      error_code: null,
+      elapsed_ms: null,
+      sentence_count: null,
+      language: null,
+      audio_duration_ms: null,
+    };
+    details.submitted_to_qwen = false;
+    details.aligned_segment_count = 0;
+    render(<ProcessingDetailsPanel details={details} />);
+    const ftRow = screen.getByText("FileTrans 正式转写").closest(".processing-detail-row");
+    expect(ftRow).toHaveClass("stage-running");
+    expect(ftRow).toHaveTextContent("正在提交正式转写");
+  });
+
+  it("shows downloading phase with elapsed time", () => {
+    const details = baseDetails();
+    details.tracks[0].filetrans = {
+      status: "running",
+      phase: "downloading",
+      poll_attempts: 3,
+      next_poll_after_ms: null,
+      last_polled_at: null,
+      retryable: false,
+      task_reference: "ft_***dl001",
+      error_code: null,
+      elapsed_ms: 5200,
+      sentence_count: null,
+      language: null,
+      audio_duration_ms: null,
+    };
+    render(<ProcessingDetailsPanel details={details} />);
+    const ftRow = screen.getByText("FileTrans 正式转写").closest(".processing-detail-row");
+    expect(ftRow).toHaveTextContent("5.2 秒");
+  });
+
+  it("shows Qwen waiting reason when FileTrans not complete", () => {
+    const details = baseDetails({
+      submitted_to_qwen: false,
+      aligned_segment_count: 0,
+    });
+    details.tracks[0].filetrans.phase = "polling";
+    details.tracks[0].filetrans.status = "running";
+    render(<ProcessingDetailsPanel details={details} />);
+    expect(screen.getByText("等待正式转写")).toBeInTheDocument();
   });
 });

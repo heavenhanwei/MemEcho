@@ -16,7 +16,9 @@ import httpx
 
 from .models import (
     FileTransDetails,
+    FileTransPhase,
     ModuleDetails,
+    PHASE_TO_STATUS,
     ProcessingDetailsResponse,
     ProcessingStage,
     TrackProcessingDetails,
@@ -83,6 +85,12 @@ def upsert_track(session: Any, upload: Any) -> dict[str, Any]:
             "modules": _default_modules(),
             "filetrans": {
                 "status": ProcessingStage.queued.value,
+                "phase": FileTransPhase.not_started.value,
+                "poll_attempts": 0,
+                "next_poll_after_ms": None,
+                "last_polled_at": None,
+                "retryable": False,
+                "task_reference": None,
                 "error_code": None,
                 "elapsed_ms": None,
                 "sentence_count": None,
@@ -170,6 +178,68 @@ def set_filetrans_stats(
     _touch(state)
 
 
+def set_filetrans_phase(
+    session: Any,
+    upload_id: str,
+    phase: FileTransPhase,
+    *,
+    poll_attempts: int | None = None,
+    next_poll_after_ms: int | None = None,
+    last_polled_at: datetime | None = None,
+    elapsed_ms: int | None = None,
+    error_code: str | None = None,
+    retryable: bool | None = None,
+    task_reference: str | None = None,
+) -> None:
+    """Transition FileTrans to a new async phase.
+
+    Keeps ``status`` in sync via ``PHASE_TO_STATUS`` for backward-compatible
+    clients that only read the legacy field.
+    """
+    state = ensure_state(session)
+    entry = state["tracks"].get(upload_id)
+    if entry is None:
+        return
+    ft = entry["filetrans"]
+    ft["phase"] = phase.value
+    ft["status"] = PHASE_TO_STATUS[phase].value
+    if poll_attempts is not None:
+        ft["poll_attempts"] = poll_attempts
+    if next_poll_after_ms is not None:
+        ft["next_poll_after_ms"] = next_poll_after_ms
+    if last_polled_at is not None:
+        ft["last_polled_at"] = last_polled_at
+    if elapsed_ms is not None:
+        ft["elapsed_ms"] = elapsed_ms
+    if error_code is not None:
+        ft["error_code"] = error_code
+    if retryable is not None:
+        ft["retryable"] = retryable
+    if task_reference is not None:
+        ft["task_reference"] = task_reference
+    _touch(state)
+
+
+def set_filetrans_poll_attempt(
+    session: Any,
+    upload_id: str,
+    *,
+    attempt: int,
+    next_poll_after_ms: int | None = None,
+    elapsed_ms: int | None = None,
+) -> None:
+    """Record a single poll attempt during the ``polling`` phase."""
+    set_filetrans_phase(
+        session,
+        upload_id,
+        FileTransPhase.polling,
+        poll_attempts=attempt,
+        next_poll_after_ms=next_poll_after_ms,
+        last_polled_at=datetime.now(UTC),
+        elapsed_ms=elapsed_ms,
+    )
+
+
 def add_transcript(session: Any, segments: list[dict[str, Any]]) -> None:
     state = ensure_state(session)
     state["transcript"].extend(segments)
@@ -232,6 +302,12 @@ def build_response(session: Any) -> ProcessingDetailsResponse:
                 },
                 filetrans=FileTransDetails(
                     status=ProcessingStage(entry["filetrans"]["status"]),
+                    phase=FileTransPhase(entry["filetrans"].get("phase", FileTransPhase.not_started.value)),
+                    poll_attempts=int(entry["filetrans"].get("poll_attempts", 0)),
+                    next_poll_after_ms=entry["filetrans"].get("next_poll_after_ms"),
+                    last_polled_at=entry["filetrans"].get("last_polled_at"),
+                    retryable=bool(entry["filetrans"].get("retryable", False)),
+                    task_reference=entry["filetrans"].get("task_reference"),
                     error_code=entry["filetrans"].get("error_code"),
                     elapsed_ms=entry["filetrans"].get("elapsed_ms"),
                     sentence_count=entry["filetrans"].get("sentence_count"),

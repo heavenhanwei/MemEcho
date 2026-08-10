@@ -358,6 +358,39 @@ class ProcessingStage(StrEnum):
     skipped = "skipped"
 
 
+class FileTransPhase(StrEnum):
+    """Fine-grained async phases for the FileTrans lifecycle.
+
+    Backward-compatible: the ``status`` field still uses ``ProcessingStage``;
+    ``phase`` provides the detailed sub-state.
+    """
+
+    not_started = "not_started"
+    submitting = "submitting"
+    queued = "queued"
+    polling = "polling"
+    downloading = "downloading"
+    normalizing = "normalizing"
+    succeeded = "succeeded"
+    failed = "failed"
+    timed_out = "timed_out"
+
+
+# Mapping from fine-grained phase to the legacy ``ProcessingStage`` so that
+# older clients that only understand ``status`` keep working.
+PHASE_TO_STATUS: dict[FileTransPhase, ProcessingStage] = {
+    FileTransPhase.not_started: ProcessingStage.queued,
+    FileTransPhase.submitting: ProcessingStage.running,
+    FileTransPhase.queued: ProcessingStage.running,
+    FileTransPhase.polling: ProcessingStage.running,
+    FileTransPhase.downloading: ProcessingStage.running,
+    FileTransPhase.normalizing: ProcessingStage.running,
+    FileTransPhase.succeeded: ProcessingStage.succeeded,
+    FileTransPhase.failed: ProcessingStage.failed,
+    FileTransPhase.timed_out: ProcessingStage.failed,
+}
+
+
 class ModuleDetails(BaseModel):
     """Sanitized per-module status. Only stable error codes, never raw text."""
 
@@ -367,6 +400,12 @@ class ModuleDetails(BaseModel):
 
 
 class FileTransDetails(ModuleDetails):
+    phase: FileTransPhase = FileTransPhase.not_started
+    poll_attempts: int = Field(default=0, ge=0)
+    next_poll_after_ms: int | None = Field(default=None, ge=0)
+    last_polled_at: datetime | None = None
+    retryable: bool = False
+    task_reference: str | None = None
     sentence_count: int | None = Field(default=None, ge=0)
     language: str | None = None
     audio_duration_ms: int | None = Field(default=None, ge=0)
