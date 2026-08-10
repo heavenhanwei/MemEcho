@@ -25,6 +25,50 @@ PhaseCallback = Callable[..., None]
 
 _TRANSCRIPTION_SUFFIX = "/api/v1/services/audio/asr/transcription"
 
+# Audio MIME types DashScope FileTrans is known to accept.
+_SUPPORTED_AUDIO_MIMES = frozenset({
+    "audio/wav",
+    "audio/x-wav",
+    "audio/mp3",
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/flac",
+    "audio/aac",
+    "audio/mp4",
+    "audio/m4a",
+    "audio/webm",
+    "audio/x-m4a",
+})
+
+
+def _sanitize_url_for_log(url: str) -> str:
+    """Return a URL safe for logging — strips query params (signatures)."""
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
+def validate_audio_url(url: str, *, content_type: str | None = None) -> None:
+    """Pre-flight check before submitting to DashScope.
+
+    Raises ``ValueError`` with a stable error-code-friendly message when the
+    URL or content type is obviously invalid.  Does NOT fetch the file.
+    """
+    if not url or not url.strip():
+        raise ValueError("audio_url is empty")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"audio_url scheme must be http/https, got {parsed.scheme!r}")
+    if not parsed.netloc:
+        raise ValueError("audio_url has no host")
+    if content_type is not None:
+        ct = content_type.split(";")[0].strip().lower()
+        if ct not in _SUPPORTED_AUDIO_MIMES:
+            log.warning(
+                "audio_url content_type may be unsupported by DashScope: %s (url=%s)",
+                ct,
+                _sanitize_url_for_log(url),
+            )
+
 
 class DashScopeClient:
     def __init__(self, settings: Settings, mock: bool = False):
@@ -71,6 +115,12 @@ class DashScopeClient:
             return "mock_task_id"
         if not self.settings.bailian_audio_base_url or not self.settings.bailian_audio_api_key:
             raise RuntimeError("DashScope audio endpoint is not configured")
+        validate_audio_url(audio_url)
+        log.info(
+            "DashScope FileTrans submit model=%s url=%s",
+            self.settings.bailian_transcription_model,
+            _sanitize_url_for_log(audio_url),
+        )
         headers = self._build_headers()
         submit_url = self._build_transcription_url()
         payload: dict[str, Any] = {
@@ -84,7 +134,7 @@ class DashScopeClient:
             data = resp.json()
             task_id = data.get("output", {}).get("task_id")
             if not task_id:
-                raise RuntimeError(f"No task_id in DashScope response: {data}")
+                raise RuntimeError("No task_id in DashScope response")
         return task_id
 
     async def poll_task_result(
@@ -157,6 +207,14 @@ class DashScopeClient:
     ) -> dict[str, Any]:
         if not self.settings.bailian_audio_base_url or not self.settings.bailian_audio_api_key:
             raise RuntimeError("DashScope audio endpoint is not configured")
+
+        validate_audio_url(audio_url)
+        log.info(
+            "DashScope submit task=%s model=%s url=%s",
+            task,
+            model,
+            _sanitize_url_for_log(audio_url),
+        )
 
         headers = self._build_headers()
 

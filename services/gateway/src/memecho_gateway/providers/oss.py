@@ -16,7 +16,7 @@ class OSSClient(Protocol):
     async def upload_file(
         self, key: str, path: Path, content_type: str
     ) -> str: ...
-    async def signed_url(self, key: str, expires: int = 3600) -> str: ...
+    async def signed_url(self, key: str, expires: int = 7200) -> str: ...
     async def delete(self, key: str) -> None: ...
 
 
@@ -66,13 +66,15 @@ class AliyunOSSClient:
             num_threads=1,
             headers={"Content-Type": content_type},
         )
-    async def signed_url(self, key: str, expires: int = 3600) -> str:
+    async def signed_url(self, key: str, expires: int = 7200) -> str:
         if self.mock:
             return f"https://mock-oss.example.com/{key}?expires={int(time.time()) + expires}"
         import oss2
 
         bucket = self._bucket()
-        return bucket.sign_url("GET", key, expires)
+        # DashScope rejects signed URLs whose object path separators are
+        # percent-encoded as ``%2F``. Keep the OSS key as a normal URL path.
+        return bucket.sign_url("GET", key, expires, slash_safe=True)
 
     async def delete(self, key: str) -> None:
         if self.mock:

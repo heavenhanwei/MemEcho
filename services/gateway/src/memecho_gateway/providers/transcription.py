@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -10,6 +11,27 @@ from ..config import Settings
 from .dashscope import DashScopeClient, PhaseCallback
 
 log = logging.getLogger(__name__)
+
+
+def _sanitize_url_for_log(url: str) -> str:
+    """Return URL with query-string (signatures/tokens) stripped for safe logging."""
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
+def _validate_audio_url(url: str) -> None:
+    """Pre-flight validation before submitting to DashScope.
+
+    Raises ``ValueError`` (mapped to ``invalid_upstream_result`` error code)
+    when the URL is obviously malformed.  Does NOT fetch the file.
+    """
+    if not url or not url.strip():
+        raise ValueError("audio_url is empty")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"audio_url scheme must be http/https, got {parsed.scheme!r}")
+    if not parsed.netloc:
+        raise ValueError("audio_url has no host")
 
 
 class TranscriptionDownloader:
@@ -45,10 +67,14 @@ class TranscriptionDownloader:
         if self.mock:
             return self._mock_transcription(url)
 
+        _validate_audio_url(url)
+        log.info("FileTrans download_with_phase url=%s", _sanitize_url_for_log(url))
+
         if on_phase:
             on_phase("submitting")
         t0 = time.monotonic()
         task_id = await self.dashscope.submit_transcription_task(url)
+        log.info("FileTrans submitted task_id=%s url=%s", task_id, _sanitize_url_for_log(url))
 
         if on_phase:
             on_phase("queued", task_reference=DashScopeClient.sanitize_task_id(task_id))
@@ -61,6 +87,7 @@ class TranscriptionDownloader:
         if on_phase:
             on_phase("downloading", elapsed_ms=int((time.monotonic() - t0) * 1000))
 
+        raw: dict[str, Any] | None = None
         for item in results:
             if item.get("subtask_status") == "FAILED":
                 if on_phase:
@@ -73,6 +100,11 @@ class TranscriptionDownloader:
                 resp = await client.get(transcription_url)
                 resp.raise_for_status()
                 raw = resp.json()
+
+        if raw is None:
+            if on_phase:
+                on_phase("failed", error_code="upstream_task_failed")
+            raise RuntimeError("transcription task returned no result URL")
 
         if on_phase:
             on_phase("normalizing", elapsed_ms=int((time.monotonic() - t0) * 1000))
