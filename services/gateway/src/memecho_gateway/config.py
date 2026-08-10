@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     bailian_realtime_max_frame_bytes: int = 1024 * 1024
     bailian_diarization_model: str = "fun-asr"
     bailian_emotion_model: str = "qwen3-asr-flash-filetrans"
+    bailian_transcription_model: str = "qwen3-asr-flash-filetrans"
 
     oss_endpoint: str = ""
     oss_bucket: str = ""

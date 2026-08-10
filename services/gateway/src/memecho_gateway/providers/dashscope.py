@@ -41,6 +41,15 @@ class DashScopeClient:
             task="emotion_labels",
         )
 
+    async def submit_transcription(self, audio_url: str) -> dict[str, Any]:
+        if self.mock:
+            return {"output": {"task_status": "SUCCEEDED", "results": []}}
+        return await self._submit_and_poll(
+            model=self.settings.bailian_transcription_model,
+            audio_url=audio_url,
+            task="transcription",
+        )
+
     def _build_transcription_url(self) -> str:
         base = self.settings.bailian_audio_base_url.rstrip("/")
         if base.endswith("/transcription"):
@@ -70,7 +79,14 @@ class DashScopeClient:
         submit_payload: dict[str, Any] = {
             "model": model,
             "input": {"file_urls": [audio_url]},
-            "parameters": {"task": task},
+            "parameters": {
+                "language_hints": ["zh", "en"],
+                **(
+                    {"diarization_enabled": True}
+                    if task == "speaker_diarization"
+                    else {}
+                ),
+            },
         }
 
         async with httpx.AsyncClient(timeout=60) as client:
@@ -90,7 +106,7 @@ class DashScopeClient:
         async with httpx.AsyncClient(timeout=30) as client:
             for attempt in range(_MAX_POLL_ATTEMPTS):
                 await asyncio.sleep(_POLL_INTERVAL_S)
-                resp = await client.post(url, headers=headers)
+                resp = await client.get(url, headers={"Authorization": headers["Authorization"]})
                 resp.raise_for_status()
                 data = resp.json()
                 status = data.get("output", {}).get("task_status", "")

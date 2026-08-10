@@ -103,7 +103,7 @@ async def test_submit_sends_correct_headers_and_body(settings):
         "https://dashscope-mock.example.com/api/v1/services/audio/asr/transcription"
     ).mock(return_value=respx.MockResponse(200, json={"output": {"task_id": "task_001"}}))
 
-    respx.post(
+    respx.get(
         "https://dashscope-mock.example.com/api/v1/tasks/task_001"
     ).mock(
         return_value=respx.MockResponse(
@@ -137,7 +137,7 @@ async def test_submit_with_full_endpoint_url(settings_full_endpoint):
         "https://dashscope-mock.example.com/api/v1/services/audio/asr/transcription"
     ).mock(return_value=respx.MockResponse(200, json={"output": {"task_id": "task_ep"}}))
 
-    respx.post(
+    respx.get(
         "https://dashscope-mock.example.com/api/v1/tasks/task_ep"
     ).mock(
         return_value=respx.MockResponse(
@@ -158,12 +158,12 @@ async def test_submit_with_full_endpoint_url(settings_full_endpoint):
 
 
 @respx.mock
-async def test_polling_uses_post_method(settings):
+async def test_polling_uses_get_method(settings):
     respx.post(
         "https://dashscope-mock.example.com/api/v1/services/audio/asr/transcription"
     ).mock(return_value=respx.MockResponse(200, json={"output": {"task_id": "task_post"}}))
 
-    poll_route = respx.post(
+    poll_route = respx.get(
         "https://dashscope-mock.example.com/api/v1/tasks/task_post"
     ).mock(
         return_value=respx.MockResponse(
@@ -181,7 +181,7 @@ async def test_polling_uses_post_method(settings):
     await client.submit_fun_asr("https://example.com/audio.wav")
     assert poll_route.called
     poll_request = poll_route.calls.last.request
-    assert poll_request.method == "POST"
+    assert poll_request.method == "GET"
 
 
 @respx.mock
@@ -190,7 +190,7 @@ async def test_polling_completes_on_succeeded(settings):
         "https://dashscope-mock.example.com/api/v1/services/audio/asr/transcription"
     ).mock(return_value=respx.MockResponse(200, json={"output": {"task_id": "task_001"}}))
 
-    respx.post(
+    respx.get(
         "https://dashscope-mock.example.com/api/v1/tasks/task_001"
     ).mock(
         return_value=respx.MockResponse(
@@ -215,7 +215,7 @@ async def test_polling_retries_then_succeeds(settings):
         "https://dashscope-mock.example.com/api/v1/services/audio/asr/transcription"
     ).mock(return_value=respx.MockResponse(200, json={"output": {"task_id": "task_002"}}))
 
-    respx.post(
+    respx.get(
         "https://dashscope-mock.example.com/api/v1/tasks/task_002"
     ).mock(
         side_effect=[
@@ -244,7 +244,7 @@ async def test_polling_raises_on_failed_task(settings):
         "https://dashscope-mock.example.com/api/v1/services/audio/asr/transcription"
     ).mock(return_value=respx.MockResponse(200, json={"output": {"task_id": "task_003"}}))
 
-    respx.post(
+    respx.get(
         "https://dashscope-mock.example.com/api/v1/tasks/task_003"
     ).mock(
         return_value=respx.MockResponse(
