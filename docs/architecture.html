@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>memEcho 架构与连通性</title>
+  <style>
+    :root { color-scheme: dark; --bg:#111326; --panel:#1b1e38; --line:#7379df; --ok:#5dd6af; --warn:#f2bd67; --bad:#f27c9b; --muted:#a9aed0; }
+    * { box-sizing:border-box; } body { margin:0; padding:32px; font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; color:#f4f5ff; background:radial-gradient(circle at 15% 0,#252854 0,#111326 48%); }
+    main { max-width:1280px; margin:auto; } h1 { margin:0 0 8px; font-size:30px; } .sub { color:var(--muted); margin:0 0 28px; }
+    .diagram { display:grid; grid-template-columns:1.1fr 1.2fr 1.1fr; gap:22px; align-items:stretch; }
+    .col { display:flex; flex-direction:column; gap:14px; justify-content:center; } .node { padding:16px 18px; border:1px solid #414875; border-radius:14px; background:linear-gradient(135deg,#24284a,#181a31); box-shadow:0 12px 24px #08091466; }
+    .node strong { display:block; font-size:16px; } .node small { color:var(--muted); } .gateway { border-color:#7c83ee; box-shadow:0 0 0 1px #7c83ee44,0 12px 28px #08091466; }
+    .upstream { border-color:#4b9c8b; } .storage { border-color:#bd8c59; } .arrow { display:flex; align-items:center; justify-content:center; color:var(--line); font-size:26px; font-weight:700; }
+    .arrow span { display:block; text-align:center; font-size:12px; line-height:1.3; color:var(--muted); font-weight:400; } .section { margin-top:32px; padding:20px; border:1px solid #303557; border-radius:16px; background:#171a31cc; }
+    table { width:100%; border-collapse:collapse; } th,td { padding:11px 10px; border-bottom:1px solid #2c3152; text-align:left; vertical-align:top; } th { color:#c9cdf1; } .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+    code { color:#d7dbff; background:#0c0e1d; padding:2px 5px; border-radius:4px; } @media(max-width:900px){ body{padding:18px}.diagram{grid-template-columns:1fr}.arrow{transform:rotate(90deg);margin:-4px 0} }
+  </style>
+</head>
+<body><main>
+  <h1>memEcho 路演版：数据链路与连通性</h1>
+  <p class="sub">当前检查：本地前端 → Gateway → OSS / 百炼语音 → 对齐 → Qwen3.7 报告</p>
+  <section class="diagram" aria-label="系统架构图">
+    <div class="col">
+      <div class="node"><strong>浏览器 / Tauri 桌面端</strong><small>localhost:1420 · 录音、字幕、报告</small></div>
+      <div class="node storage"><strong>本地 SQLite + 双轨 WAV</strong><small>会话、恢复清单、报告与证据</small></div>
+    </div>
+    <div class="col">
+      <div class="arrow">→<span>REST / SSE / WebSocket</span></div>
+      <div class="node gateway"><strong>FastAPI Gateway</strong><small>127.0.0.1:8787 · 编排、合同校验、降级</small></div>
+      <div class="arrow">↕<span>8MB 分块上传 / 签名 URL</span></div>
+    </div>
+    <div class="col">
+      <div class="node storage"><strong>私有 OSS</strong><small>临时媒体，分析完成后删除，24h 兜底生命周期</small></div>
+      <div class="node upstream"><strong>Fun-ASR</strong><small>说话人分离、时间戳</small></div>
+      <div class="node upstream"><strong>Qwen ASR FileTrans</strong><small>正式转写与情绪标签</small></div>
+      <div class="node upstream"><strong>Qwen3.7</strong><small>纪要、VAD、事实/观点/态度、自我回声</small></div>
+    </div>
+  </section>
+  <section class="section"><h2>连通性检查结果</h2>
+    <table><thead><tr><th>模块链路</th><th>状态</th><th>证据 / 下一步</th></tr></thead><tbody>
+      <tr><td>1420 → Gateway health</td><td class="ok">已通</td><td><code>/v1/health</code> 返回 <code>status=ok, provider=bailian</code></td></tr>
+      <tr><td>Gateway → 百炼 Endpoint</td><td class="ok">网络可达</td><td>文本端返回 404、音频端返回 401，说明服务端可达；401 表示需要鉴权，不代表业务调用成功。</td></tr>
+      <tr><td>Gateway → OSS</td><td class="ok">只读鉴权成功</td><td>Bucket <code>lookatconfig</code> 可读取，区域 <code>oss-cn-beijing</code>。</td></tr>
+      <tr><td>Fun-ASR → 对齐</td><td class="warn">已修复，待短音频复验</td><td>轮询已改为 GET；上次真实公共样例已返回 SUCCEEDED。</td></tr>
+      <tr><td>FileTrans 转写/情绪 → 对齐</td><td class="warn">当前瓶颈</td><td>代码链路已接入，但真实 FileTrans 样例曾超时；没有转写片段时对齐必为空。</td></tr>
+      <tr><td>对齐 → Qwen3.7</td><td class="warn">被上游阻断</td><td>当前会话没有有效文本/声学证据，因此只能返回 insufficient，不能生成正式纪要。</td></tr>
+    </tbody></table>
+  </section>
+</main></body></html>
