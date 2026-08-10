@@ -274,6 +274,37 @@ async def test_bailian_provider_repairs_structurally_invalid_json_once():
     assert repair_payload["validation_errors"]
 
 
+async def test_bailian_provider_repairs_missing_evidence_reference_once():
+    request = {
+        "request_id": "req_bailian_semantic_repair",
+        "source": {"type": "text", "text": "Only submitted evidence."},
+    }
+    segments = build_text_segments(request["source"]["text"])
+    session = {"observations": {"text_segments": segments}}
+    valid_result = await MockProvider().analyze(session, [], request)
+    invalid_result = json.loads(json.dumps(valid_result))
+    invalid_result["insights"][0]["evidence_refs"] = ["ev_missing"]
+
+    class SemanticRepairingBailianProvider(BailianProvider):
+        def __init__(self):
+            self.calls = []
+
+        async def _chat_completion(self, messages):
+            self.calls.append(messages)
+            return json.dumps(invalid_result if len(self.calls) == 1 else valid_result)
+
+    provider = SemanticRepairingBailianProvider()
+    result = await provider.analyze(session, [], request)
+
+    assert result["insights"][0]["evidence_refs"] == [segments[0]["evidence_id"]]
+    assert len(provider.calls) == 2
+    repair_payload = json.loads(provider.calls[1][1]["content"])
+    assert any(
+        error["message"] == "insight references missing evidence"
+        for error in repair_payload["validation_errors"]
+    )
+
+
 async def test_text_only_rejects_provider_acoustic_hallucination(tmp_path):
     memory_store = MemoryStore(tmp_path)
     session = await memory_store.create_session(

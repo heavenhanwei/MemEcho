@@ -5,9 +5,9 @@ import re
 from typing import Any
 
 import httpx
-from pydantic import ValidationError
 
 from ..config import Settings
+from ..contracts import validate_result
 from ..models import AnalysisResult
 
 
@@ -121,17 +121,18 @@ class BailianProvider:
 
         self._enforce_conservative_recommendations(result)
 
-        try:
-            AnalysisResult.model_validate(result)
+        text_segments = (
+            session.get("observations", {}).get("text_segments")
+            if source.get("type") in {"text", "transcript"}
+            else None
+        )
+        contract_errors = validate_result(result, text_segments=text_segments)
+        if not contract_errors:
             return result
-        except ValidationError as exc:
-            errors = [
-                {
-                    "field": ".".join(str(part) for part in error["loc"]),
-                    "message": error["msg"],
-                }
-                for error in exc.errors(include_url=False)
-            ]
+        errors = [
+            {"field": "contract", "message": message}
+            for message in contract_errors
+        ]
 
         repaired = await self._chat_completion(
             [
@@ -141,7 +142,10 @@ class BailianProvider:
                         "Perform one structural repair of a memEcho AnalysisResult. "
                         "Return only the AnalysisResult JSON object. Preserve supported "
                         "meaning, do not invent evidence, and use only evidence identifiers "
-                        "and excerpts present in the original input."
+                        "and excerpts present in the original input. Every evidence_refs "
+                        "entry must exactly match an id in the repaired evidence array. "
+                        "Prefer reconnecting a claim to an existing evidence item; omit a "
+                        "claim when no supplied evidence supports it."
                     ),
                 },
                 {
