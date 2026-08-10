@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>memEcho 连通性审计报告</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --heading: #e6edf3; --green: #3fb950; --yellow: #d29922; --red: #f85149; --blue: #58a6ff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; padding: 2rem; max-width: 1200px; margin: 0 auto; }
+  h1 { color: var(--heading); font-size: 1.8rem; margin-bottom: 0.5rem; }
+  h2 { color: var(--heading); font-size: 1.3rem; margin: 2rem 0 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+  h3 { color: var(--heading); font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+  .meta { color: #8b949e; font-size: 0.9rem; margin-bottom: 1.5rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; margin: 1rem 0; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { background: #1c2128; color: var(--heading); font-weight: 600; }
+  .status-ok { color: var(--green); font-weight: 600; }
+  .status-warn { color: var(--yellow); font-weight: 600; }
+  .status-fail { color: var(--red); font-weight: 600; }
+  .status-locked { color: #8b949e; font-weight: 600; }
+  pre { background: #1c2128; border: 1px solid var(--border); border-radius: 4px; padding: 1rem; overflow-x: auto; font-size: 0.85rem; color: var(--text); }
+  code { font-family: 'Cascadia Code', 'Fira Code', monospace; }
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1rem 0; }
+  .summary-item { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; text-align: center; }
+  .summary-item .num { font-size: 2rem; font-weight: 700; }
+  .summary-item .label { font-size: 0.85rem; color: #8b949e; }
+  .risk-high { border-left: 3px solid var(--red); }
+  .risk-medium { border-left: 3px solid var(--yellow); }
+  .risk-low { border-left: 3px solid var(--green); }
+  ul { padding-left: 1.5rem; margin: 0.5rem 0; }
+  li { margin: 0.25rem 0; }
+  .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: #8b949e; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+
+<h1>memEcho 连通性审计报告</h1>
+<div class="meta">
+  审计时间: 2026-08-10T07:43Z &nbsp;|&nbsp;
+  范围: 前端 1420 → Gateway 8787 → OSS → Fun-ASR / Qwen FileTrans → 对齐 → Qwen3.7 &nbsp;|&nbsp;
+  类型: 只读连通性测试 + 代码路径审查 &nbsp;|&nbsp;
+  工作树: connectivity-audit
+</div>
+
+<h2>测试结果概览</h2>
+<div class="summary-grid">
+  <div class="summary-item"><div class="num" style="color:var(--green)">123</div><div class="label">测试通过</div></div>
+  <div class="summary-item"><div class="num" style="color:var(--red)">11</div><div class="label">测试失败</div></div>
+  <div class="summary-item"><div class="num" style="color:var(--green)">6</div><div class="label">链路可达</div></div>
+  <div class="summary-item"><div class="num" style="color:var(--yellow)">4</div><div class="label">未验证</div></div>
+  <div class="summary-item"><div class="num" style="color:var(--red)">1</div><div class="label">阻塞</div></div>
+</div>
+
+<h2>架构数据流</h2>
+<div class="card">
+<pre><code>┌─────────────┐     REST / SSE / WS      ┌──────────────────┐
+│  浏览器/Tauri│ ──────────────────────── │  FastAPI Gateway  │
+│  localhost:  │     :8787/v1/*            │  127.0.0.1:8787  │
+│    1420      │                           └──────┬───────────┘
+└──────┬───────┘                                  │
+       │ 本地双轨录音                              │
+       ▼                                          ├─► OSS (私有, 24h 生命周期)
+┌──────────────┐                                  ├─► Fun-ASR (说话人分离)
+│  SQLite +    │                                  ├─► Qwen FileTrans (转写)
+│  本地音频     │                                  ├─► Qwen FileTrans (情绪)
+└──────────────┘                                  └─► Qwen3.7 (纪要/分析)
+                                                     │
+                                                     ▼
+                                              ┌──────────────┐
+                                              │  时间区间对齐  │
+                                              │  + DSP 质量   │
+                                              └──────────────┘</code></pre>
+</div>
+
+<h3>数据流详解</h3>
+<div class="card">
+<ol>
+  <li><strong>前端 → Gateway</strong>: 浏览器/Tauri 通过 REST 创建 Session、8MB 分块上传音频、触发分析、SSE 监听进度、WebSocket 实时字幕</li>
+  <li><strong>Gateway → OSS</strong>: 上传完成后写入私有 OSS，生成签名 URL 供百炼访问</li>
+  <li><strong>Gateway → Fun-ASR</strong>: <code>POST /api/v1/services/audio/asr/transcription</code> + <code>GET /api/v1/tasks/{task_id}</code> 轮询</li>
+  <li><strong>Gateway → Qwen FileTrans</strong>: 同一端点，不同 model 参数 (转写/情绪)</li>
+  <li><strong>Gateway → 对齐</strong>: <code>alignment.align_intervals()</code> 合并转写、说话人、情绪区间</li>
+  <li><strong>对齐 → Qwen3.7</strong>: <code>POST {BAILIAN_TEXT_BASE_URL}/chat/completions</code> 含 aligned_segments</li>
+</ol>
+</div>
+
+<h2>链路可达性测试结果</h2>
+<div class="card">
+<table>
+<thead><tr><th>#</th><th>链路</th><th>端点</th><th>状态</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Frontend 1420</td><td><code>http://127.0.0.1:1420</code></td><td class="status-warn">⚠️ 未验证</td><td>Vite dev server 未运行 (Tauri 桌面端正常)</td></tr>
+<tr><td>2</td><td>Gateway /v1/health</td><td><code>GET http://127.0.0.1:8787/v1/health</code></td><td class="status-ok">✅ 可达</td><td><code>{"status":"ok","provider":"bailian","version":"0.1.0"}</code></td></tr>
+<tr><td>3</td><td>CORS (localhost:1420)</td><td><code>OPTIONS</code> + Origin</td><td class="status-ok">✅ 通过</td><td><code>access-control-allow-origin: http://localhost:1420</code></td></tr>
+<tr><td>4</td><td>CORS (tauri://localhost)</td><td><code>OPTIONS</code> + Origin</td><td class="status-ok">✅ 通过</td><td><code>access-control-allow-origin: tauri://localhost</code></td></tr>
+<tr><td>5</td><td>CORS (恶意来源)</td><td><code>OPTIONS</code> + evil.com</td><td class="status-ok">✅ 拒绝</td><td>Disallowed CORS origin</td></tr>
+<tr><td>6</td><td>鉴权 (无 token)</td><td><code>POST /v1/sessions</code></td><td class="status-ok">✅ 拒绝</td><td>HTTP 401</td></tr>
+<tr><td>7</td><td>鉴权 (有效 token)</td><td><code>POST /v1/sessions</code></td><td class="status-ok">✅ 通过</td><td>HTTP 200, 返回 session id</td></tr>
+<tr><td>8</td><td>Session 创建</td><td><code>POST /v1/sessions</code></td><td class="status-ok">✅ 可用</td><td>正确创建 session</td></tr>
+<tr><td>9</td><td>未知路由</td><td><code>GET /v1/nonexistent</code></td><td class="status-ok">✅ 正确</td><td>HTTP 404</td></tr>
+<tr><td>10</td><td>SSE 事件</td><td><code>GET /v1/jobs/{id}/events</code></td><td class="status-ok">✅ 正确</td><td>不存在的 job 返回 404</td></tr>
+<tr><td>11</td><td>处理详情</td><td><code>GET /v1/sessions/{id}/processing-details</code></td><td class="status-fail">❌ 不存在</td><td>HTTP 404 — P0 待实现 (BUG-007)</td></tr>
+<tr><td>12</td><td>百炼文本域名</td><td><code>BAILIAN_TEXT_BASE_URL</code></td><td class="status-locked">🔒 未配置</td><td>运行实例未加载 .env</td></tr>
+<tr><td>13</td><td>百炼音频域名</td><td><code>BAILIAN_AUDIO_BASE_URL</code></td><td class="status-locked">🔒 未配置</td><td>运行实例未加载 .env</td></tr>
+<tr><td>14</td><td>百炼实时 WS</td><td><code>BAILIAN_REALTIME_WS_URL</code></td><td class="status-locked">🔒 未配置</td><td>运行实例未加载 .env</td></tr>
+<tr><td>15</td><td>OSS Endpoint</td><td><code>OSS_ENDPOINT</code></td><td class="status-locked">🔒 未配置</td><td>运行实例未加载 .env</td></tr>
+<tr><td>16</td><td>WebSocket 端点</td><td><code>WS /v1/sessions/{id}/live</code></td><td class="status-ok">✅ 正确</td><td>无 upgrade 时返回 404</td></tr>
+</tbody>
+</table>
+</div>
+<p style="color:#8b949e;font-size:0.85rem;margin-top:0.5rem;">安全说明: 本次审计不读取 .env 文件内容，不输出 API Key、OSS Secret、签名 URL 或原始供应商响应。</p>
+
+<h2>Gateway 路由一致性</h2>
+<div class="card">
+<table>
+<thead><tr><th>路由</th><th>方法</th><th>鉴权</th><th>CORS</th><th>前端调用</th><th>代码位置</th></tr></thead>
+<tbody>
+<tr><td><code>/v1/health</code></td><td>GET</td><td>无</td><td>✅</td><td><code>gateway.health()</code></td><td>main.py:141</td></tr>
+<tr><td><code>/v1/sessions</code></td><td>POST</td><td>Bearer</td><td>✅</td><td><code>gateway.createSession()</code></td><td>main.py:146</td></tr>
+<tr><td><code>/v1/sessions/{id}/uploads</code></td><td>POST</td><td>Bearer</td><td>✅</td><td><code>gateway.uploadBlob()</code></td><td>main.py:158</td></tr>
+<tr><td><code>/v1/sessions/{id}/uploads/{id}/chunks/{i}</code></td><td>PUT</td><td>Bearer</td><td>✅</td><td>uploadBlob loop</td><td>main.py:189</td></tr>
+<tr><td><code>/v1/sessions/{id}/uploads/{id}/complete</code></td><td>POST</td><td>Bearer</td><td>✅</td><td>uploadBlob</td><td>main.py:227</td></tr>
+<tr><td><code>/v1/sessions/{id}/participants/resolve</code></td><td>POST</td><td>Bearer</td><td>✅</td><td><code>resolveParticipants()</code></td><td>main.py:280</td></tr>
+<tr><td><code>/v1/sessions/{id}/participants/candidates</code></td><td>GET</td><td>Bearer</td><td>✅</td><td><code>participantCandidates()</code></td><td>main.py:305</td></tr>
+<tr><td><code>/v1/sessions/{id}/analyze</code></td><td>POST</td><td>Bearer</td><td>✅</td><td><code>gateway.analyze()</code></td><td>main.py:341</td></tr>
+<tr><td><code>/v1/jobs/{id}</code></td><td>GET</td><td>Bearer</td><td>✅</td><td><code>gateway.job()</code></td><td>main.py:372</td></tr>
+<tr><td><code>/v1/jobs/{id}/events</code></td><td>GET (SSE)</td><td>Bearer</td><td>✅</td><td><code>gateway.jobEvents()</code></td><td>main.py:383</td></tr>
+<tr><td><code>/v1/sessions/{id}/result</code></td><td>GET</td><td>Bearer</td><td>✅</td><td><code>gateway.result()</code></td><td>main.py:399</td></tr>
+<tr><td><code>/v1/sessions/{id}/artifacts</code></td><td>GET</td><td>Bearer</td><td>✅</td><td><code>gateway.artifacts()</code></td><td>main.py:413</td></tr>
+<tr><td><code>/v1/chat/stream</code></td><td>POST (SSE)</td><td>Bearer</td><td>✅</td><td><code>gateway.chat()</code></td><td>main.py:470</td></tr>
+<tr><td><code>/v1/sessions/{id}/live</code></td><td>WebSocket</td><td>token query</td><td>N/A</td><td><code>gateway.liveUrl()</code></td><td>main.py:485</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>测试套件结果</h2>
+<p><strong>总计</strong>: 134 tests — <span style="color:var(--green)">123 通过</span>, <span style="color:var(--red)">11 失败</span></p>
+
+<h3>失败详情</h3>
+<div class="card">
+<table>
+<thead><tr><th>测试</th><th>根因</th><th>严重度</th></tr></thead>
+<tbody>
+<tr class="risk-high"><td><code>test_cors::test_local_frontend_origin_can_read_health</code></td><td>httpx 测试客户端未返回 CORS header</td><td>低</td></tr>
+<tr class="risk-high"><td><code>test_dashscope::test_submit_sends_correct_headers_and_body</code></td><td><code>_poll_result</code> 用 POST 而非 GET 轮询</td><td style="color:var(--red)">高</td></tr>
+<tr class="risk-high"><td><code>test_dashscope::test_submit_with_full_endpoint_url</code></td><td>同上</td><td style="color:var(--red)">高</td></tr>
+<tr class="risk-high"><td><code>test_dashscope::test_polling_uses_get_method</code></td><td>同上</td><td style="color:var(--red)">高</td></tr>
+<tr class="risk-high"><td><code>test_dashscope::test_polling_completes_on_succeeded</code></td><td>同上</td><td style="color:var(--red)">高</td></tr>
+<tr class="risk-high"><td><code>test_dashscope::test_polling_retries_then_succeeds</code></td><td>同上</td><td style="color:var(--red)">高</td></tr>
+<tr class="risk-high"><td><code>test_dashscope::test_polling_raises_on_failed_task</code></td><td>同上</td><td style="color:var(--red)">高</td></tr>
+<tr class="risk-medium"><td><code>test_realtime::test_client_forwards_pcm_and_maps_official_events</code></td><td>缺少 <code>OpenAI-Beta</code> header 断言</td><td>中</td></tr>
+<tr class="risk-medium"><td><code>test_text_only::test_bailian_text_provider_receives_strict_text_only_prompt</code></td><td>测试断言过期</td><td>中</td></tr>
+<tr class="risk-medium"><td><code>test_text_only::test_bailian_provider_repairs_structurally_invalid_json_once</code></td><td>测试断言过期</td><td>中</td></tr>
+<tr class="risk-medium"><td><code>test_text_only::test_text_only_rejects_provider_acoustic_hallucination</code></td><td>错误类型不匹配</td><td>中</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>关键 Bug: DashScope <code>_poll_result</code> 使用 POST 而非 GET</h3>
+<div class="card risk-high">
+<p><strong>位置</strong>: <code>dashscope.py:93</code></p>
+<p><strong>问题</strong>: <code>_poll_result</code> 方法使用 <code>resp = await client.post(url, headers=headers)</code>，但 DashScope 官方任务查询 API 要求 <code>GET /api/v1/tasks/{task_id}</code>。</p>
+<p><strong>证据</strong>: 测试文件 <code>test_dashscope.py</code> 正确地 mock 了 GET 并断言 <code>method == "GET"</code>，但实现代码使用了 POST。</p>
+<p><strong>业务影响</strong>: Fun-ASR、Qwen FileTrans (转写)、Qwen FileTrans (情绪) 的任务状态轮询可能在真实百炼环境中被拒绝，导致长音频分析永远无法完成。</p>
+</div>
+
+<h2>处理详情接口 (BUG-007 P0)</h2>
+<div class="card risk-high">
+<p><strong>状态</strong>: ❌ 未实现</p>
+<p><code>GET /v1/sessions/{session_id}/processing-details</code> 端点不存在 (返回 404)。当前用户在长音频分析失败时只能看到泛化的 <code>RuntimeError</code> 或 <code>insufficient</code>，无法定位责任模块。</p>
+</div>
+
+<h2>业务影响评估</h2>
+<div class="card">
+<table>
+<thead><tr><th>风险</th><th>影响</th><th>优先级</th></tr></thead>
+<tbody>
+<tr class="risk-high"><td>DashScope 轮询使用 POST</td><td>百炼任务查询可能被拒绝，长音频分析阻塞</td><td style="color:var(--red)">P0</td></tr>
+<tr class="risk-high"><td>处理详情接口缺失</td><td>用户无法定位长音频失败原因</td><td style="color:var(--red)">P0</td></tr>
+<tr class="risk-medium"><td>百炼/OSS 未配置</td><td>Gateway 以 mock 模式运行</td><td>环境依赖</td></tr>
+<tr class="risk-low"><td>CORS 测试环境差异</td><td>生产行为正确</td><td>P2</td></tr>
+<tr class="risk-low"><td>实时字幕 header 断言</td><td>测试断言不完整</td><td>P2</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>下一步建议</h2>
+<div class="card">
+<ol>
+<li><strong>修复 <code>_poll_result</code> 方法</strong> (<code>dashscope.py:93</code>): 将 <code>client.post()</code> 改为 <code>client.get()</code></li>
+<li><strong>实现处理详情接口</strong> (BUG-007 P0): 新增 <code>GET /v1/sessions/{id}/processing-details</code></li>
+<li><strong>配置真实百炼凭证</strong>: 在 <code>.env</code> 中配置完整百炼/OSS 连接参数</li>
+<li><strong>修复过期测试</strong>: 更新 <code>test_text_only.py</code> 和 <code>test_realtime.py</code></li>
+<li><strong>端到端冒烟测试</strong>: 使用 10-20 秒 WAV 验证完整链路</li>
+</ol>
+</div>
+
+<div class="footer">
+  memEcho 连通性审计 — 生成于 2026-08-10T07:43Z — 只读审计，未修改业务代码或生产配置
+</div>
+
+</body>
+</html>
