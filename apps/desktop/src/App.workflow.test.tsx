@@ -412,4 +412,144 @@ describe("web workflow degradation", () => {
     expect(uploadSpy).not.toHaveBeenCalled();
     expect(saveSpy).not.toHaveBeenCalled();
   });
+
+  it("shows explicit error when web recording blob is empty", async () => {
+    // Override FakeMediaRecorder to produce zero-size blobs
+    class EmptyMediaRecorder {
+      mimeType = "audio/webm";
+      ondataavailable: ((event: { data: Blob }) => void) | null = null;
+      onstop: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      start = vi.fn();
+      stop = vi.fn(() => {
+        // No data pushed → empty blob
+        this.onstop?.();
+      });
+    }
+    vi.stubGlobal("MediaRecorder", EmptyMediaRecorder);
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: vi.fn().mockResolvedValue(new FakeMediaStream()) },
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByText("点击球体，开始录音"));
+    expect(await screen.findByText("正在录音")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("结束并分析"));
+
+    expect(await screen.findByText(/浏览器录音数据为空/)).toBeInTheDocument();
+    expect(gateway.uploadBlob).not.toHaveBeenCalled();
+    expect(gateway.analyze).not.toHaveBeenCalled();
+  });
+
+  it("shows clear error when uploadBlob fails and allows retry", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: vi.fn().mockResolvedValue(new FakeMediaStream()) },
+    });
+    vi.mocked(gateway.uploadBlob).mockRejectedValueOnce(new Error("network timeout"));
+    vi.mocked(gateway.jobEvents).mockImplementation(async (_jobId, onEvent) => {
+      onEvent(job("complete", 100));
+    });
+
+    render(<App />);
+    await startAndStop();
+
+    expect(await screen.findByText(/浏览器录音上传失败/)).toBeInTheDocument();
+    expect(screen.getByText(/network timeout/)).toBeInTheDocument();
+    expect(screen.getByText(/录音数据仍保留在本地，可重试/)).toBeInTheDocument();
+    expect(screen.getByText("重试当前步骤")).toBeInTheDocument();
+    expect(gateway.analyze).not.toHaveBeenCalled();
+
+    // Retry should succeed
+    vi.mocked(gateway.uploadBlob).mockResolvedValueOnce({
+      upload_id: "web-upload-retry",
+      path: "asset://web-upload-retry",
+      size: 3,
+      sha256: "b".repeat(64),
+    });
+    fireEvent.click(screen.getByText("重试当前步骤"));
+    expect(await screen.findByText("这次对话，发生了什么？")).toBeInTheDocument();
+    expect(gateway.analyze).toHaveBeenCalledTimes(1);
+  });
+
+  it("fetches processing details immediately after uploadBlob succeeds", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: vi.fn().mockResolvedValue(new FakeMediaStream()) },
+    });
+    const detailsWithTrack = {
+      session_id: "sess-1",
+      updated_at: "2026-01-01T00:00:00Z",
+      tracks: [
+        {
+          upload_id: "web-upload",
+          file_name: "browser-microphone.webm",
+          track: "microphone",
+          mime_type: "audio/webm",
+          size_bytes: 1024,
+          upload_status: "succeeded",
+          received_chunks: 1,
+          expected_chunks: 1,
+          oss_status: "succeeded",
+          modules: {
+            fun_asr: { status: "succeeded", error_code: null, elapsed_ms: 500 },
+            emotion: { status: "succeeded", error_code: null, elapsed_ms: 300 },
+            transcription: { status: "succeeded", error_code: null, elapsed_ms: 2000 },
+          },
+          filetrans: {
+            status: "succeeded",
+            error_code: null,
+            elapsed_ms: 2000,
+            sentence_count: 15,
+            language: "zh",
+            audio_duration_ms: 30000,
+          },
+        },
+      ],
+      aligned_segment_count: 15,
+      submitted_to_qwen: true,
+      qwen_status: "succeeded",
+      qwen_error_code: null,
+      transcript_segments: [
+        { speaker_id: "speaker_1", start_ms: 0, end_ms: 5000, text: "测试转写片段内容" },
+      ],
+      transcript_truncated: false,
+    };
+    vi.mocked(gateway.processingDetails).mockResolvedValue(detailsWithTrack);
+
+    render(<App />);
+    await startAndStop();
+
+    // After upload completes, processing details should be fetched immediately
+    expect(await screen.findByText("这次对话，发生了什么？")).toBeInTheDocument();
+    expect(gateway.processingDetails).toHaveBeenCalledWith("sess-1");
+    expect(gateway.uploadBlob).toHaveBeenCalledWith("sess-1", expect.any(Blob), "microphone");
+  });
+
+  it("shows MediaRecorder error with stable message", async () => {
+    class ErrorMediaRecorder {
+      mimeType = "audio/webm";
+      ondataavailable: ((event: { data: Blob }) => void) | null = null;
+      onstop: (() => void) | null = null;
+      onerror: ((event: ErrorEvent) => void) | null = null;
+      start = vi.fn();
+      stop = vi.fn(() => {
+        this.onerror?.(new ErrorEvent("error", { message: "codec not supported" }));
+      });
+    }
+    vi.stubGlobal("MediaRecorder", ErrorMediaRecorder);
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: vi.fn().mockResolvedValue(new FakeMediaStream()) },
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByText("点击球体，开始录音"));
+    expect(await screen.findByText("正在录音")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("结束并分析"));
+
+    expect(await screen.findByText(/浏览器录音结束失败/)).toBeInTheDocument();
+    expect(gateway.uploadBlob).not.toHaveBeenCalled();
+  });
 });

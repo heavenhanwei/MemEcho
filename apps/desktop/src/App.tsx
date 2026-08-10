@@ -759,11 +759,17 @@ function NowPage() {
         context.uploaded = true;
       } else if (context.webRecording && !context.uploaded) {
         state.patch({ jobStatus: "uploading", progress: 8, stageLabel: "正在上传浏览器录音" });
-        await gateway.uploadBlob(
-          context.gatewaySessionId,
-          context.webRecording,
-          source === "mixed" ? "mixed" : "microphone",
-        );
+        try {
+          await gateway.uploadBlob(
+            context.gatewaySessionId,
+            context.webRecording,
+            source === "mixed" ? "mixed" : "microphone",
+          );
+        } catch (uploadCause) {
+          throw new Error(
+            `浏览器录音上传失败：${describeError(uploadCause, "网络或服务端错误")}（录音数据仍保留在本地，可重试）`,
+          );
+        }
         context.uploaded = true;
         context.webRecording = undefined;
         const recordingId = webRecordingId.current;
@@ -774,8 +780,16 @@ function NowPage() {
             .then((recordings) => setRecoveredRecordings(recordings))
             .catch(() => undefined);
         }
+        // Immediately reflect upload success in the processing details panel.
+        state.patch({ jobStatus: "uploaded", progress: 12, stageLabel: "浏览器录音上传完成，正在提交分析" });
+        try {
+          const details = await gateway.processingDetails(context.gatewaySessionId);
+          setProcessingDetails(details);
+        } catch {
+          // Details are supplementary; the upload succeeded regardless.
+        }
       } else if (!context.localSessionId && !context.uploaded) {
-        throw new Error("浏览器录音不可用，请重新录制");
+        throw new Error("浏览器录音不可用：录音数据为空或未成功录制，请重新录制");
       }
 
       if (!context.jobId) {
@@ -921,10 +935,13 @@ function NowPage() {
               }),
             );
           };
-          currentRecorder.onerror = () => reject(new Error("浏览器录音结束失败"));
+          currentRecorder.onerror = () => reject(new Error("浏览器录音结束失败：MediaRecorder 异常"));
           currentRecorder.stop();
         });
         recorder.current = null;
+        if (webRecording.size === 0) {
+          throw new Error("浏览器录音数据为空：录音时长过短或未成功采集音频，请重新录制");
+        }
       }
     } catch (cause) {
       stopFailure = cause;
