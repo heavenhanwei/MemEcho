@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -241,6 +242,84 @@ class TestDownloadWithPhaseRawGuard:
         result = await downloader.download_with_phase("ftp://whatever")
         assert result["language"] == "zh"
         assert len(result["transcript"]) > 0
+
+
+class TestQwenFileTransContract:
+    """Qwen FileTrans differs from the Fun-ASR file_urls/results contract."""
+
+    @respx.mock
+    async def test_submit_uses_singular_file_url(self, settings):
+        route = respx.post(
+            "https://dashscope-mock.example.com/api/v1/services/audio/asr/transcription"
+        ).mock(
+            return_value=respx.MockResponse(
+                200, json={"output": {"task_id": "task_qwen_001"}}
+            )
+        )
+
+        client = DashScopeClient(settings, mock=False)
+        task_id = await client.submit_transcription_task(
+            "https://example.com/audio.webm"
+        )
+
+        payload = json.loads(route.calls.last.request.content)
+        assert task_id == "task_qwen_001"
+        assert payload["input"] == {"file_url": "https://example.com/audio.webm"}
+        assert "file_urls" not in payload["input"]
+        assert payload["parameters"]["enable_words"] is True
+
+    @respx.mock
+    async def test_download_reads_singular_result_transcription_url(self, settings):
+        respx.post(
+            "https://dashscope-mock.example.com/api/v1/services/audio/asr/transcription"
+        ).mock(
+            return_value=respx.MockResponse(
+                200, json={"output": {"task_id": "task_qwen_002"}}
+            )
+        )
+        respx.get(
+            "https://dashscope-mock.example.com/api/v1/tasks/task_qwen_002"
+        ).mock(
+            return_value=respx.MockResponse(
+                200,
+                json={
+                    "output": {
+                        "task_status": "SUCCEEDED",
+                        "result": {
+                            "transcription_url": "https://example.com/qwen-result.json"
+                        },
+                    }
+                },
+            )
+        )
+        respx.get("https://example.com/qwen-result.json").mock(
+            return_value=respx.MockResponse(
+                200,
+                json={
+                    "transcripts": [
+                        {
+                            "channel_id": 0,
+                            "sentences": [
+                                {
+                                    "begin_time": 0,
+                                    "end_time": 1200,
+                                    "text": "测试完成",
+                                    "emotion": "neutral",
+                                }
+                            ],
+                        }
+                    ],
+                    "properties": {"original_duration_in_milliseconds": 1200},
+                },
+            )
+        )
+
+        downloader = TranscriptionDownloader(settings, mock=False)
+        result = await downloader.download("https://example.com/audio.webm")
+
+        assert result["transcript"][0]["text"] == "测试完成"
+        assert result["transcript"][0]["emotion"] == "neutral"
+        assert result["duration_ms"] == 1200
 
 
 # ---------------------------------------------------------------------------

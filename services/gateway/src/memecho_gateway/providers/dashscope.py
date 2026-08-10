@@ -102,12 +102,9 @@ class DashScopeClient:
 
     async def submit_transcription(self, audio_url: str) -> dict[str, Any]:
         if self.mock:
-            return {"output": {"task_status": "SUCCEEDED", "results": []}}
-        return await self._submit_and_poll(
-            model=self.settings.bailian_transcription_model,
-            audio_url=audio_url,
-            task="transcription",
-        )
+            return {"output": {"task_status": "SUCCEEDED", "result": {}}}
+        task_id = await self.submit_transcription_task(audio_url)
+        return await self.poll_task_result(task_id)
 
     async def submit_transcription_task(self, audio_url: str) -> str:
         """Submit a transcription task and return the raw task_id."""
@@ -125,8 +122,15 @@ class DashScopeClient:
         submit_url = self._build_transcription_url()
         payload: dict[str, Any] = {
             "model": self.settings.bailian_transcription_model,
-            "input": {"file_urls": [audio_url]},
-            "parameters": {"language_hints": ["zh", "en"]},
+            # Qwen3-ASR-Flash-Filetrans uses a singular file_url.  The
+            # file_urls array belongs to Fun-ASR/Paraformer and is rejected by
+            # Qwen FileTrans after task creation with MalformedURL.
+            "input": {"file_url": audio_url},
+            "parameters": {
+                "channel_id": [0],
+                "enable_itn": False,
+                "enable_words": True,
+            },
         }
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(submit_url, json=payload, headers=headers)
@@ -219,14 +223,27 @@ class DashScopeClient:
         headers = self._build_headers()
 
         submit_url = self._build_transcription_url()
+        qwen_filetrans = model.casefold().startswith("qwen3-asr-flash-filetrans")
         submit_payload: dict[str, Any] = {
             "model": model,
-            "input": {"file_urls": [audio_url]},
+            "input": (
+                {"file_url": audio_url}
+                if qwen_filetrans
+                else {"file_urls": [audio_url]}
+            ),
             "parameters": {
-                "language_hints": ["zh", "en"],
+                **(
+                    {
+                        "channel_id": [0],
+                        "enable_itn": False,
+                        "enable_words": True,
+                    }
+                    if qwen_filetrans
+                    else {"language_hints": ["zh", "en"]}
+                ),
                 **(
                     {"diarization_enabled": True}
-                    if task == "speaker_diarization"
+                    if task == "speaker_diarization" and not qwen_filetrans
                     else {}
                 ),
             },

@@ -44,18 +44,11 @@ class TranscriptionDownloader:
         if self.mock:
             return self._mock_transcription(url)
         task_result = await self.dashscope.submit_transcription(url)
-        results = task_result.get("output", {}).get("results", [])
-        for item in results:
-            if item.get("subtask_status") == "FAILED":
-                raise RuntimeError(str(item.get("code") or "transcription task failed"))
-            transcription_url = item.get("transcription_url")
-            if not transcription_url:
-                continue
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.get(transcription_url)
-                resp.raise_for_status()
-                return self._normalize_result(resp.json())
-        raise RuntimeError("transcription task returned no result URL")
+        transcription_url = self._transcription_url(task_result)
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(transcription_url)
+            resp.raise_for_status()
+            return self._normalize_result(resp.json())
 
     async def download_with_phase(
         self,
@@ -82,29 +75,20 @@ class TranscriptionDownloader:
         task_result = await self.dashscope.poll_task_result(
             task_id, on_phase=on_phase, start_time=t0,
         )
-        results = task_result.get("output", {}).get("results", [])
-
         if on_phase:
             on_phase("downloading", elapsed_ms=int((time.monotonic() - t0) * 1000))
 
-        raw: dict[str, Any] | None = None
-        for item in results:
-            if item.get("subtask_status") == "FAILED":
-                if on_phase:
-                    on_phase("failed", error_code="upstream_task_failed")
-                raise RuntimeError(str(item.get("code") or "transcription task failed"))
-            transcription_url = item.get("transcription_url")
-            if not transcription_url:
-                continue
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.get(transcription_url)
-                resp.raise_for_status()
-                raw = resp.json()
-
-        if raw is None:
+        try:
+            transcription_url = self._transcription_url(task_result)
+        except RuntimeError:
             if on_phase:
                 on_phase("failed", error_code="upstream_task_failed")
-            raise RuntimeError("transcription task returned no result URL")
+            raise
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(transcription_url)
+            resp.raise_for_status()
+            raw = resp.json()
 
         if on_phase:
             on_phase("normalizing", elapsed_ms=int((time.monotonic() - t0) * 1000))
@@ -127,6 +111,23 @@ class TranscriptionDownloader:
         return normalized
 
     @staticmethod
+    def _transcription_url(task_result: dict[str, Any]) -> str:
+        """Read Qwen FileTrans result URL, with legacy Fun-ASR fallback."""
+        output = task_result.get("output", {})
+        result = output.get("result")
+        if isinstance(result, dict) and result.get("transcription_url"):
+            return str(result["transcription_url"])
+
+        for item in output.get("results", []):
+            if item.get("subtask_status") == "FAILED":
+                raise RuntimeError(
+                    str(item.get("code") or "transcription task failed")
+                )
+            if item.get("transcription_url"):
+                return str(item["transcription_url"])
+        raise RuntimeError("transcription task returned no result URL")
+
+    @staticmethod
     def _normalize_result(data: dict[str, Any]) -> dict[str, Any]:
         segments: list[dict[str, Any]] = []
         for transcript in data.get("transcripts", []):
@@ -139,6 +140,10 @@ class TranscriptionDownloader:
                         "end_ms": int(sentence.get("end_time", 0)),
                         "text": str(sentence.get("text", "")),
                         "confidence": 0.9,
+                        "emotion": str(sentence.get("emotion", "unknown")),
+                        "emotion_confidence": float(
+                            sentence.get("emotion_confidence", 0.0) or 0.0
+                        ),
                     }
                 )
         return {
