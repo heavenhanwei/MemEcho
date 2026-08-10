@@ -21,6 +21,19 @@ from .store import MemoryStore
 log = logging.getLogger(__name__)
 
 
+class AnalysisContractError(ValueError):
+    """The provider returned JSON that violates the memEcho result contract."""
+
+
+def _contract_error(errors: list[str]) -> AnalysisContractError:
+    # validate_result emits field paths and invariant messages only. Keep the
+    # response bounded and do not expose transcript text or raw model output.
+    detail = "; ".join(errors[:12])
+    if len(errors) > 12:
+        detail += f"; and {len(errors) - 12} more validation errors"
+    return AnalysisContractError(detail[:2000])
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -126,7 +139,7 @@ class Orchestrator:
 
         errors = validate_result(result, text_segments=text_segments)
         if errors:
-            raise ValueError("; ".join(errors))
+            raise _contract_error(errors)
 
         await self.store.update_job(
             job_id, JobStatus.rendering, 90, "Rendering local report"
@@ -274,7 +287,7 @@ class Orchestrator:
 
             errors = validate_result(result)
             if errors:
-                raise ValueError("; ".join(errors))
+                raise _contract_error(errors)
 
             await self.store.update_job(job_id, JobStatus.rendering, 90, "生成本地报告")
             result["rendered_markdown"] = render_markdown(result)
@@ -283,13 +296,16 @@ class Orchestrator:
             await self.store.update_job(job_id, JobStatus.complete, 100, "报告已完成")
 
         except Exception as exc:
+            current_progress = self.store.jobs[job_id].progress
+            error_detail = str(exc) if isinstance(exc, AnalysisContractError) else None
             await self.store.update_job(
                 job_id,
                 JobStatus.failed,
-                100,
+                current_progress,
                 "分析失败",
                 retryable=True,
                 error_code=type(exc).__name__,
+                error_detail=error_detail,
             )
         finally:
             session.resume_scheduled_jobs.discard(job_id)

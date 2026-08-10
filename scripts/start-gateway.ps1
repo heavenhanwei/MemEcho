@@ -27,13 +27,19 @@ if (-not (Test-Path (Join-Path $GatewayDir "pyproject.toml"))) {
     exit 1
 }
 
-# Check Python. Prefer PATH, then the standard per-user Python 3.12 install
-# location used by the Windows installer. This avoids requiring a global PATH
-# change on a demo machine.
+# Check Python. Prefer the project virtual environment so a stale Windows Store
+# alias or broken PATH entry cannot prevent the local gateway from starting.
+# Then try PATH and the standard per-user Python install locations.
 $pythonPath = $null
-$pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-if ($pythonCommand) {
-    $pythonPath = $pythonCommand.Source
+$projectPython = Join-Path $ProjectDir ".venv\Scripts\python.exe"
+if (Test-Path -LiteralPath $projectPython) {
+    $pythonPath = $projectPython
+}
+if (-not $pythonPath) {
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonCommand) {
+        $pythonPath = $pythonCommand.Source
+    }
 }
 if (-not $pythonPath) {
     $localPythonRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\Python"

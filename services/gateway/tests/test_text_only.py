@@ -241,6 +241,37 @@ async def test_bailian_text_provider_receives_strict_text_only_prompt():
     assert "TEXT-ONLY MODE" in system_prompt
     assert "acoustic_weight=0" in system_prompt
     assert "session.observations.text_segments" in system_prompt
+    assert "REQUIRED OUTPUT JSON SCHEMA" in system_prompt
+    assert '"schema_version"' in system_prompt
+
+
+async def test_bailian_provider_repairs_structurally_invalid_json_once():
+    request = {
+        "request_id": "req_bailian_repair",
+        "source": {"type": "text", "text": "Only submitted evidence."},
+    }
+    segments = build_text_segments(request["source"]["text"])
+    session = {"observations": {"text_segments": segments}}
+    valid_result = await MockProvider().analyze(session, [], request)
+
+    class RepairingBailianProvider(BailianProvider):
+        def __init__(self):
+            self.calls = []
+
+        async def _chat_completion(self, messages):
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                return json.dumps({"summary": "wrong wrapper"})
+            return json.dumps(valid_result)
+
+    provider = RepairingBailianProvider()
+    result = await provider.analyze(session, [], request)
+
+    assert result["schema_version"] == "1.1"
+    assert len(provider.calls) == 2
+    repair_payload = json.loads(provider.calls[1][1]["content"])
+    assert repair_payload["invalid_result"] == {"summary": "wrong wrapper"}
+    assert repair_payload["validation_errors"]
 
 
 async def test_text_only_rejects_provider_acoustic_hallucination(tmp_path):
@@ -272,5 +303,7 @@ async def test_text_only_rejects_provider_acoustic_hallucination(tmp_path):
     await orchestrator.run(job.id, session.id, request)
 
     assert memory_store.jobs[job.id].status == JobStatus.failed
-    assert memory_store.jobs[job.id].error_code == "ValueError"
+    assert memory_store.jobs[job.id].error_code == "AnalysisContractError"
+    assert memory_store.jobs[job.id].progress < 100
+    assert "text_only" in (memory_store.jobs[job.id].error_detail or "")
     assert session.result is None

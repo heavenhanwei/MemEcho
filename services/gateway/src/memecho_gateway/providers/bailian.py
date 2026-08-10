@@ -5,8 +5,10 @@ import re
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 
 from ..config import Settings
+from ..models import AnalysisResult
 
 
 SYSTEM_PROMPT = """你是 memEcho 对话分析服务。只分析可观察的表达，不诊断心理状态，不推断隐藏意图。
@@ -38,6 +40,7 @@ class BailianProvider:
             "temperature": 0.1,
             "max_tokens": 16384,
             "enable_thinking": False,
+            "response_format": {"type": "json_object"},
         }
         headers = {"Authorization": f"Bearer {self.settings.bailian_text_api_key}"}
         url = f"{self.settings.bailian_text_base_url.rstrip('/')}/chat/completions"
@@ -60,13 +63,33 @@ class BailianProvider:
                 return json.loads(match.group(0))
             raise
 
+    @staticmethod
+    def _enforce_conservative_recommendations(result: dict[str, Any]) -> None:
+        """Recommendations can never be presented as discussed commitments."""
+        minutes = result.get("minutes")
+        if not isinstance(minutes, dict):
+            return
+        recommendations = minutes.get("recommendations")
+        if not isinstance(recommendations, list):
+            return
+        for item in recommendations:
+            if isinstance(item, dict):
+                item["origin"] = "suggested"
+                item["status"] = "proposed"
+
     async def analyze(
         self, session: dict[str, Any], tracks: list[str], request: dict[str, Any]
     ) -> dict[str, Any]:
         source = request.get("source") or {}
-        system_prompt = SYSTEM_PROMPT
+        result_schema = AnalysisResult.model_json_schema()
+        schema_prompt = json.dumps(result_schema, ensure_ascii=False, separators=(",", ":"))
+        system_prompt = (
+            f"{SYSTEM_PROMPT}\n\nREQUIRED OUTPUT JSON SCHEMA:\n{schema_prompt}\n"
+            "Return the AnalysisResult object itself, not a wrapper or prose. "
+            "Populate every required field and use null only where the schema permits it."
+        )
         if source.get("type") in {"text", "transcript"}:
-            system_prompt = f"{SYSTEM_PROMPT}\n\n{TEXT_ONLY_PROMPT}"
+            system_prompt = f"{system_prompt}\n\n{TEXT_ONLY_PROMPT}"
 
         # Audio adapters write normalized observations into session before this call.
         prompt = json.dumps(
@@ -80,15 +103,68 @@ class BailianProvider:
             ]
         )
         try:
-            return self._extract_json(text)
+            result = self._extract_json(text)
         except Exception:
             repaired = await self._chat_completion(
                 [
-                    {"role": "system", "content": "只修复 JSON 语法与 memEcho 1.1 字段结构，不改变语义。"},
+                    {
+                        "role": "system",
+                        "content": (
+                            "Repair JSON syntax only. Return the AnalysisResult object "
+                            "as JSON with no prose or wrapper."
+                        ),
+                    },
                     {"role": "user", "content": text},
                 ]
             )
-            return self._extract_json(repaired)
+            result = self._extract_json(repaired)
+
+        self._enforce_conservative_recommendations(result)
+
+        try:
+            AnalysisResult.model_validate(result)
+            return result
+        except ValidationError as exc:
+            errors = [
+                {
+                    "field": ".".join(str(part) for part in error["loc"]),
+                    "message": error["msg"],
+                }
+                for error in exc.errors(include_url=False)
+            ]
+
+        repaired = await self._chat_completion(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Perform one structural repair of a memEcho AnalysisResult. "
+                        "Return only the AnalysisResult JSON object. Preserve supported "
+                        "meaning, do not invent evidence, and use only evidence identifiers "
+                        "and excerpts present in the original input."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "required_schema": result_schema,
+                            "validation_errors": errors,
+                            "invalid_result": result,
+                            "original_input": {
+                                "session": session,
+                                "tracks": tracks,
+                                "request": request,
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+        )
+        result = self._extract_json(repaired)
+        self._enforce_conservative_recommendations(result)
+        return result
 
     async def chat(self, question: str, context: dict[str, Any]) -> str:
         return await self._chat_completion(

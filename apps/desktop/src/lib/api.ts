@@ -192,6 +192,7 @@ export interface GatewayJob {
   stage_label: string;
   retryable: boolean;
   error_code?: string | null;
+  error_detail?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -206,6 +207,17 @@ export interface ParticipantCandidate {
 
 export interface ParticipantCandidatesResponse {
   candidates: ParticipantCandidate[];
+}
+
+interface UploadCreated {
+  upload_id: string;
+  chunk_size: number;
+  received_chunks: number[];
+}
+
+async function sha256Hex(data: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export interface ParticipantResolution {
@@ -289,6 +301,47 @@ export const gateway = {
         marks: [],
       }),
     }),
+  uploadBlob: async (
+    sessionId: string,
+    blob: Blob,
+    track: "microphone" | "mixed",
+  ) => {
+    if (blob.size === 0) throw new Error("Browser recording is empty");
+    const bytes = await blob.arrayBuffer();
+    const sha256 = await sha256Hex(bytes);
+    const mimeType = blob.type || "audio/webm";
+    const created = await request<UploadCreated>(`/v1/sessions/${id(sessionId)}/uploads`, {
+      method: "POST",
+      body: JSON.stringify({
+        track,
+        file_name: track === "mixed" ? "browser-mixed.webm" : "browser-microphone.webm",
+        mime_type: mimeType,
+        size: blob.size,
+        sha256,
+      }),
+    });
+    for (
+      let offset = 0, index = 0;
+      offset < blob.size;
+      offset += created.chunk_size, index += 1
+    ) {
+      await request<{ ok: boolean; index: number }>(
+        `/v1/sessions/${id(sessionId)}/uploads/${id(created.upload_id)}/chunks/${index}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: blob.slice(offset, Math.min(offset + created.chunk_size, blob.size)),
+        },
+      );
+    }
+    return request<{ upload_id: string; path: string; size: number; sha256: string }>(
+      `/v1/sessions/${id(sessionId)}/uploads/${id(created.upload_id)}/complete`,
+      {
+        method: "POST",
+        body: JSON.stringify({ upload_id: created.upload_id, sha256 }),
+      },
+    );
+  },
   analyze: (
     sessionId: string,
     requestId: string,

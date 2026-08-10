@@ -331,6 +331,9 @@ class JobView(BaseModel):
     stage_label: str
     retryable: bool = False
     error_code: str | None = None
+    # Safe, bounded diagnostics for the authenticated client. Never include
+    # provider payloads, transcript text, credentials, or model output here.
+    error_detail: str | None = Field(default=None, max_length=2000)
     created_at: datetime
     updated_at: datetime
 

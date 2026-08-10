@@ -29,6 +29,39 @@ afterEach(() => {
 });
 
 describe("gateway session analysis APIs", () => {
+  it("uploads a browser recording through the resumable media contract", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(responseJson({
+        upload_id: "upload-1", chunk_size: 2, received_chunks: [],
+      }))
+      .mockResolvedValueOnce(responseJson({ ok: true, index: 0 }))
+      .mockResolvedValueOnce(responseJson({ ok: true, index: 1 }))
+      .mockResolvedValueOnce(responseJson({
+        upload_id: "upload-1", path: "asset://upload-1", size: 3, sha256: "ignored",
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await gateway.uploadBlob(
+      "session-1",
+      new Blob([new Uint8Array([1, 2, 3])], { type: "audio/webm" }),
+      "microphone",
+    );
+
+    const declaration = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(declaration).toMatchObject({
+      track: "microphone", file_name: "browser-microphone.webm", size: 3,
+    });
+    expect(declaration.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(fetchMock.mock.calls[1][0]).toContain("/chunks/0");
+    expect(fetchMock.mock.calls[2][0]).toContain("/chunks/1");
+    expect(fetchMock.mock.calls[1][1].headers).toMatchObject({
+      "Content-Type": "application/octet-stream",
+    });
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toEqual({
+      upload_id: "upload-1", sha256: declaration.sha256,
+    });
+  });
+
   it("includes imported text as the text-only source contract", async () => {
     const fetchMock = vi.fn().mockResolvedValue(responseJson({
       id: "job-1", session_id: "session-1", request_id: "request-1",

@@ -62,6 +62,7 @@ type WorkflowContext = {
   requestId: string;
   localSessionId: string | null;
   uploaded: boolean;
+  webRecording?: Blob;
   source?: { type: "text" | "transcript"; text: string };
   jobId: string | null;
   identityResolved: boolean;
@@ -138,6 +139,7 @@ function NowPage() {
   const isTauri = isTauriRuntime();
   const timer = useRef<number | undefined>(undefined);
   const recorder = useRef<MediaRecorder | null>(null);
+  const browserRecordingChunks = useRef<Blob[]>([]);
   const stream = useRef<MediaStream | null>(null);
   const socket = useRef<WebSocket | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
@@ -477,7 +479,11 @@ function NowPage() {
         const browserCapture = await openBrowserAudioCapture(source);
         stream.current = browserCapture.media;
         browserCaptureStop.current = browserCapture.stop;
+        browserRecordingChunks.current = [];
         recorder.current = new MediaRecorder(browserCapture.media);
+        recorder.current.ondataavailable = (event) => {
+          if (event.data.size > 0) browserRecordingChunks.current.push(event.data);
+        };
         recorder.current.start(1000);
         startLiveAudio(browserCapture.media);
       }
@@ -652,12 +658,17 @@ function NowPage() {
           getGatewayUrl(),
         );
         context.uploaded = true;
-      } else if (!context.localSessionId && !context.uploaded) {
-        state.patch({
-          progress: 8,
-          stageLabel: "网页演示模式：跳过桌面音频上传与本地持久化",
-        });
+      } else if (context.webRecording && !context.uploaded) {
+        state.patch({ jobStatus: "uploading", progress: 8, stageLabel: "正在上传浏览器录音" });
+        await gateway.uploadBlob(
+          context.gatewaySessionId,
+          context.webRecording,
+          source === "mixed" ? "mixed" : "microphone",
+        );
         context.uploaded = true;
+        context.webRecording = undefined;
+      } else if (!context.localSessionId && !context.uploaded) {
+        throw new Error("浏览器录音不可用，请重新录制");
       }
 
       if (!context.jobId) {
@@ -679,7 +690,7 @@ function NowPage() {
           context.jobId = null;
           context.requestId = `${context.requestId}-retry-${Date.now()}`;
         }
-        throw new Error(current.error_code ?? "分析失败");
+        throw new Error(current.error_detail ?? current.error_code ?? "分析失败");
       }
       await finishWorkflow(context);
     } catch (cause) {
@@ -760,7 +771,7 @@ function NowPage() {
           context.jobId = null;
           context.requestId = `${context.requestId}-retry-${Date.now()}`;
         }
-        throw new Error(current.error_code ?? "分析失败");
+        throw new Error(current.error_detail ?? current.error_code ?? "分析失败");
       }
       await finishWorkflow(context);
     } catch (cause) {
@@ -786,13 +797,26 @@ function NowPage() {
     recordingActive.current = false;
 
     let stopFailure: unknown = null;
+    let webRecording: Blob | undefined;
     try {
       if (backend.current === "tauri") {
         const stopped = await bridge.stopCapture();
         localSessionId.current = stopped.session_id;
         state.patch({ localSessionId: stopped.session_id });
       } else {
-        recorder.current?.stop();
+        const currentRecorder = recorder.current;
+        if (!currentRecorder) throw new Error("浏览器录音器不可用");
+        webRecording = await new Promise<Blob>((resolve, reject) => {
+          currentRecorder.onstop = () => {
+            resolve(
+              new Blob(browserRecordingChunks.current, {
+                type: currentRecorder.mimeType || "audio/webm",
+              }),
+            );
+          };
+          currentRecorder.onerror = () => reject(new Error("浏览器录音结束失败"));
+          currentRecorder.stop();
+        });
         recorder.current = null;
       }
     } catch (cause) {
@@ -820,6 +844,7 @@ function NowPage() {
       requestId,
       localSessionId: backend.current === "tauri" ? localSessionId.current : null,
       uploaded: false,
+      webRecording,
       jobId: null,
       identityResolved: false,
     };

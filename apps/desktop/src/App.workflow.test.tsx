@@ -26,6 +26,12 @@ vi.mock("./lib/api", () => ({
   initGatewayConfig: vi.fn().mockResolvedValue("https://gateway.example"),
   gateway: {
     createSession: vi.fn(),
+    uploadBlob: vi.fn().mockResolvedValue({
+      upload_id: "web-upload",
+      path: "asset://web-upload",
+      size: 3,
+      sha256: "a".repeat(64),
+    }),
     liveUrl: vi.fn(() => "ws://gateway/live"),
     analyze: vi.fn(),
     job: vi.fn(),
@@ -46,10 +52,17 @@ class FakeMediaStream {
 }
 
 class FakeMediaRecorder {
+  mimeType = "audio/webm";
+  ondataavailable: ((event: { data: Blob }) => void) | null = null;
+  onstop: (() => void) | null = null;
+  onerror: (() => void) | null = null;
   start = vi.fn();
   pause = vi.fn();
   resume = vi.fn();
-  stop = vi.fn();
+  stop = vi.fn(() => {
+    this.ondataavailable?.({ data: new Blob(["pcm"], { type: this.mimeType }) });
+    this.onstop?.();
+  });
   constructor(public stream: unknown) {}
 }
 
@@ -355,7 +368,7 @@ describe("desktop analysis workflow", () => {
 });
 
 describe("web workflow degradation", () => {
-  it("skips desktop persistence and falls back from SSE to polling", async () => {
+  it("uploads browser audio, skips desktop persistence, and falls back from SSE to polling", async () => {
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
       value: { getUserMedia: vi.fn().mockResolvedValue(new FakeMediaStream()) },
@@ -370,6 +383,7 @@ describe("web workflow degradation", () => {
 
     expect(await screen.findByText("这次对话，发生了什么？")).toBeInTheDocument();
     expect(gateway.job).toHaveBeenCalledWith("job-1");
+    expect(gateway.uploadBlob).toHaveBeenCalledWith("sess-1", expect.any(Blob), "microphone");
     expect(uploadSpy).not.toHaveBeenCalled();
     expect(saveSpy).not.toHaveBeenCalled();
   });
