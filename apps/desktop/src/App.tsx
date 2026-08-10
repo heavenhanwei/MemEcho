@@ -21,6 +21,7 @@ import { ReportView } from "./components/ReportView";
 import { RelationsView } from "./components/RelationsView";
 import {
   gateway,
+  GatewayApiError,
   getGatewayUrl,
   hasGatewayToken,
   initGatewayConfig,
@@ -262,14 +263,27 @@ function NowPage() {
     const sessionId = useAppStore.getState().sessionId;
     if (!sessionId) return;
     let cancelled = false;
+    let stopped = false;
     const refresh = () => {
+      if (stopped) return;
       gateway
         .processingDetails(sessionId)
         .then((details) => {
-          if (!cancelled) setProcessingDetails(details);
+          if (!cancelled && !stopped) setProcessingDetails(details);
         })
-        .catch(() => {
-          // Details are supplementary; the main job progress remains authoritative.
+        .catch((cause) => {
+          if (cancelled || stopped) return;
+          if (cause instanceof GatewayApiError && cause.status === 404) {
+            stopped = true;
+            setProcessingDetails(null);
+            setCanRetry(false);
+            setError(
+              "Gateway 已找不到当前会话，可能服务刚刚重启；本次处理详情已停止刷新，请重新录音或重新导入。",
+            );
+            state.patch({ stageLabel: "当前会话已失效，请重新开始" });
+            return;
+          }
+          // Details are supplementary; transient errors keep the main job progress authoritative.
         });
     };
     refresh();
