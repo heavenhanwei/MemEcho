@@ -65,6 +65,12 @@ describe("ProcessingDetailsPanel", () => {
     expect(empty.container.firstChild).toBeNull();
   });
 
+  it("shows the pipeline placeholder when processing details are not available yet", () => {
+    render(<ProcessingDetailsPanel details={null} showEmpty />);
+    expect(screen.getByText("FileTrans 正式转写")).toBeInTheDocument();
+    expect(screen.getByText("结束录音后，这里会显示上传、FileTrans 轮询和正式转写文本。")).toBeInTheDocument();
+  });
+
   it("shows pipeline stages with counters", () => {
     render(<ProcessingDetailsPanel details={baseDetails()} />);
     expect(screen.getByText("PIPELINE · 会后处理详情")).toBeInTheDocument();

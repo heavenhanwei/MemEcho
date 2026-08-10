@@ -169,10 +169,35 @@ function trackRows(track: TrackProcessingDetails) {
 
 export function ProcessingDetailsPanel({
   details,
+  showEmpty = false,
 }: {
   details: ProcessingDetails | null;
+  showEmpty?: boolean;
 }) {
-  if (!details || details.tracks.length === 0) return null;
+  if (!details || details.tracks.length === 0) {
+    if (!showEmpty) return null;
+    return (
+      <div className="processing-details" aria-label="会后处理详情">
+        <p className="eyebrow">PIPELINE · 会后处理详情</p>
+        <StageRow
+          name="Gateway 上传"
+          stage="queued"
+          detail="等待录音上传"
+        />
+        <StageRow name="OSS 临时媒体" stage="queued" detail="等待 Gateway 上传" />
+        <StageRow
+          name="FileTrans 正式转写"
+          stage="queued"
+          detail={filetransPhaseLabel.not_started}
+        />
+        <StageRow name="证据对齐" stage="queued" detail="等待正式转写" />
+        <StageRow name="Qwen3.7" stage="queued" detail="等待对齐结果" />
+        <p className="processing-detail-hint" role="status">
+          结束录音后，这里会显示上传、FileTrans 轮询和正式转写文本。
+        </p>
+      </div>
+    );
+  }
 
   const filetransFailed = details.tracks.find(
     (track) =>

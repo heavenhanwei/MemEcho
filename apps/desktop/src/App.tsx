@@ -1039,7 +1039,7 @@ function NowPage() {
             <RotateCcw size={15} /> {workflowBusy ? "正在重试…" : "重试当前步骤"}
           </button>
         )}
-        <ProcessingDetailsPanel details={processingDetails} />
+        <ProcessingDetailsPanel details={processingDetails} showEmpty />
       </section>
     );
   }
