@@ -82,3 +82,21 @@ def test_align_intervals_best_overlap_wins():
     emotions = []
     result = align_intervals(transcripts, speakers, emotions)
     assert result[0]["speaker_id"] == "speaker_2"
+
+
+def test_align_intervals_skips_malformed_supplier_metadata():
+    transcripts = [
+        {"speaker_id": "speaker_0", "start_ms": 0, "end_ms": 1000, "text": "ok"},
+        {"speaker_id": "speaker_0", "text": "missing time"},
+    ]
+    speakers = [
+        {"transcription_url": "https://example.invalid/result.json"},
+        {"speaker_id": "speaker_1", "start_ms": 0, "end_ms": 1000},
+    ]
+    emotions = [{"emotion": "neutral"}]
+
+    result = align_intervals(transcripts, speakers, emotions)
+
+    assert len(result) == 1
+    assert result[0]["speaker_id"] == "speaker_1"
+    assert result[0]["emotion"] == "unknown"

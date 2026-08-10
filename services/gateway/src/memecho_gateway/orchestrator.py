@@ -188,7 +188,36 @@ class Orchestrator:
                         retryable=True,
                     )
             elif name == "fun_asr":
-                collected["diarization"] = value.get("output", {}).get("results", [])
+                try:
+                    if self.transcription and hasattr(
+                        self.transcription, "download_diarization"
+                    ):
+                        collected["diarization"] = (
+                            await self.transcription.download_diarization(value)
+                        )
+                    else:
+                        collected["diarization"] = value.get("output", {}).get(
+                            "results", []
+                        )
+                except Exception as normalize_exc:
+                    log.warning(
+                        "Audio model result normalization failed source=fun_asr",
+                        exc_info=normalize_exc,
+                    )
+                    collected["errors"].append(
+                        {
+                            "source": "fun_asr",
+                            "error_code": type(normalize_exc).__name__,
+                        }
+                    )
+                    if session is not None and upload_id is not None:
+                        processing_details.set_module(
+                            session,
+                            upload_id,
+                            "fun_asr",
+                            ProcessingStage.failed,
+                            error_code=processing_details.safe_error_code(normalize_exc),
+                        )
             elif name == "emotion":
                 collected["emotions"] = value.get("output", {}).get("results", [])
             else:
@@ -209,6 +238,20 @@ class Orchestrator:
                     processing_details.add_transcript(
                         session, value.get("transcript", [])
                     )
+        transcript_emotions = []
+        for segment in collected["transcript"]:
+            emotion = str(segment.get("emotion", "unknown"))
+            if emotion and emotion != "unknown":
+                transcript_emotions.append(
+                    {
+                        "start_ms": segment.get("start_ms"),
+                        "end_ms": segment.get("end_ms"),
+                        "emotion": emotion,
+                        "confidence": segment.get("emotion_confidence", 0.0),
+                    }
+                )
+        if transcript_emotions:
+            collected["emotions"] = transcript_emotions
         return collected
 
     async def _run_text_only(
@@ -468,6 +511,12 @@ class Orchestrator:
             await self.store.update_job(job_id, JobStatus.complete, 100, "报告已完成")
 
         except Exception as exc:
+            log.exception(
+                "Analysis job failed job_id=%s session_id=%s error_type=%s",
+                job_id,
+                session_id,
+                type(exc).__name__,
+            )
             current_progress = self.store.jobs[job_id].progress
             error_detail = str(exc) if isinstance(exc, AnalysisContractError) else None
             if session.processing.get("qwen_status") == ProcessingStage.running.value:

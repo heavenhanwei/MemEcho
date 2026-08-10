@@ -50,6 +50,33 @@ class TranscriptionDownloader:
             resp.raise_for_status()
             return self._normalize_result(resp.json())
 
+    async def download_diarization(
+        self, task_result: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Resolve a Fun-ASR task result into normalized speaker intervals.
+
+        DashScope's task endpoint returns result-file pointers, not the
+        sentence intervals consumed by the aligner.  Legacy mocks may already
+        contain normalized intervals, so retain that shape as a compatibility
+        path.
+        """
+        direct = self._normalize_diarization_entries(
+            task_result.get("output", {}).get("results", [])
+        )
+        if direct:
+            return direct
+
+        urls = self._transcription_urls(task_result)
+        intervals: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(timeout=60) as client:
+            for result_url in urls:
+                response = await client.get(result_url)
+                response.raise_for_status()
+                intervals.extend(self._normalize_diarization_payload(response.json()))
+        if not intervals:
+            raise ValueError("Fun-ASR produced no usable speaker intervals")
+        return intervals
+
     async def download_with_phase(
         self,
         url: str,
@@ -126,6 +153,88 @@ class TranscriptionDownloader:
             if item.get("transcription_url"):
                 return str(item["transcription_url"])
         raise RuntimeError("transcription task returned no result URL")
+
+    @staticmethod
+    def _transcription_urls(task_result: dict[str, Any]) -> list[str]:
+        """Return every successful result URL without exposing it in errors."""
+        output = task_result.get("output", {})
+        result = output.get("result")
+        if isinstance(result, dict) and result.get("transcription_url"):
+            return [str(result["transcription_url"])]
+
+        urls: list[str] = []
+        for item in output.get("results", []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("subtask_status") == "FAILED":
+                raise RuntimeError(str(item.get("code") or "transcription task failed"))
+            if item.get("transcription_url"):
+                urls.append(str(item["transcription_url"]))
+        if not urls:
+            raise RuntimeError("transcription task returned no result URL")
+        return urls
+
+    @staticmethod
+    def _speaker_id(value: Any) -> str:
+        speaker = str(value if value is not None else "unknown")
+        return speaker if speaker.startswith("speaker_") else f"speaker_{speaker}"
+
+    @classmethod
+    def _normalize_diarization_entries(
+        cls, entries: Any
+    ) -> list[dict[str, Any]]:
+        intervals: list[dict[str, Any]] = []
+        if not isinstance(entries, list):
+            return intervals
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                start_ms = int(entry["start_ms"])
+                end_ms = int(entry["end_ms"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start_ms < 0 or end_ms <= start_ms:
+                continue
+            intervals.append(
+                {
+                    "speaker_id": cls._speaker_id(entry.get("speaker_id")),
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                }
+            )
+        return intervals
+
+    @classmethod
+    def _normalize_diarization_payload(
+        cls, data: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        intervals: list[dict[str, Any]] = []
+        for transcript in data.get("transcripts", []):
+            if not isinstance(transcript, dict):
+                continue
+            for sentence in transcript.get("sentences", []):
+                if not isinstance(sentence, dict):
+                    continue
+                try:
+                    start_ms = int(sentence["begin_time"])
+                    end_ms = int(sentence["end_time"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if start_ms < 0 or end_ms <= start_ms:
+                    continue
+                intervals.append(
+                    {
+                        "speaker_id": cls._speaker_id(
+                            sentence.get(
+                                "speaker_id", transcript.get("channel_id", "unknown")
+                            )
+                        ),
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                    }
+                )
+        return intervals
 
     @staticmethod
     def _normalize_result(data: dict[str, Any]) -> dict[str, Any]:
