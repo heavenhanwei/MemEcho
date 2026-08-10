@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
+from . import media_cleanup, processing_details
 from .alignment import align_intervals
 from .contracts import validate_result
-from .models import JobStatus
+from .models import JobStatus, ProcessingStage
 from .providers.oss import make_oss_key
 from .quality import compute_quality_metrics, conservative_evidence_weights
 from .rendering import render_html, render_markdown
@@ -42,14 +44,54 @@ class Orchestrator:
         oss_client: Any | None = None,
         dashscope_client: Any | None = None,
         transcription_downloader: Any | None = None,
+        media_retention_seconds: float = 24 * 60 * 60,
     ):
         self.store = store
         self.provider = provider
         self.oss = oss_client
         self.dashscope = dashscope_client
         self.transcription = transcription_downloader
+        self.media_retention_seconds = media_retention_seconds
 
-    async def _collect_remote_observations(self, audio_url: str) -> dict[str, Any]:
+    async def _invoke_module(
+        self,
+        name: str,
+        coro: Any,
+        session: Any | None,
+        upload_id: str | None,
+    ) -> tuple[Any, BaseException | None, int]:
+        if session is not None and upload_id is not None:
+            processing_details.set_module(
+                session, upload_id, name, ProcessingStage.running
+            )
+        started = time.monotonic()
+        try:
+            value = await coro
+        except BaseException as exc:  # noqa: BLE001 - status is recorded, then re-raised
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            if session is not None and upload_id is not None:
+                processing_details.set_module(
+                    session,
+                    upload_id,
+                    name,
+                    ProcessingStage.failed,
+                    error_code=processing_details.safe_error_code(exc),
+                    elapsed_ms=elapsed_ms,
+                )
+            raise
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        if session is not None and upload_id is not None:
+            processing_details.set_module(
+                session, upload_id, name, ProcessingStage.succeeded, elapsed_ms=elapsed_ms
+            )
+        return value, None, elapsed_ms
+
+    async def _collect_remote_observations(
+        self,
+        audio_url: str,
+        session: Any | None = None,
+        upload_id: str | None = None,
+    ) -> dict[str, Any]:
         calls: dict[str, Any] = {}
         if self.dashscope:
             calls["fun_asr"] = self.dashscope.submit_fun_asr(audio_url)
@@ -57,20 +99,36 @@ class Orchestrator:
         if self.transcription:
             calls["transcription"] = self.transcription.download(audio_url)
         if not calls:
-            return {"diarization": [], "emotions": [], "transcript": [], "errors": []}
+            return {
+                "diarization": [],
+                "emotions": [],
+                "transcript": [],
+                "errors": [],
+                "filetrans": None,
+            }
 
-        values = await asyncio.gather(*calls.values(), return_exceptions=True)
+        async def guarded(name: str, coro: Any) -> tuple[str, Any, BaseException | None]:
+            try:
+                value, _, _ = await self._invoke_module(name, coro, session, upload_id)
+                return name, value, None
+            except BaseException as exc:  # noqa: BLE001 - degradation is recorded per module
+                return name, None, exc
+
+        outcomes = await asyncio.gather(
+            *(guarded(name, coro) for name, coro in calls.items())
+        )
         collected: dict[str, Any] = {
             "diarization": [],
             "emotions": [],
             "transcript": [],
             "errors": [],
+            "filetrans": None,
         }
-        for name, value in zip(calls, values, strict=True):
-            if isinstance(value, BaseException):
-                log.warning("Audio model failed source=%s", name, exc_info=value)
+        for name, value, exc in outcomes:
+            if exc is not None:
+                log.warning("Audio model failed source=%s", name, exc_info=exc)
                 collected["errors"].append(
-                    {"source": name, "error_code": type(value).__name__}
+                    {"source": name, "error_code": type(exc).__name__}
                 )
             elif name == "fun_asr":
                 collected["diarization"] = value.get("output", {}).get("results", [])
@@ -78,6 +136,22 @@ class Orchestrator:
                 collected["emotions"] = value.get("output", {}).get("results", [])
             else:
                 collected["transcript"] = value.get("transcript", [])
+                collected["filetrans"] = {
+                    "sentence_count": len(value.get("transcript", [])),
+                    "language": value.get("language"),
+                    "audio_duration_ms": value.get("duration_ms"),
+                }
+                if session is not None and upload_id is not None:
+                    processing_details.set_filetrans_stats(
+                        session,
+                        upload_id,
+                        sentence_count=collected["filetrans"]["sentence_count"],
+                        language=collected["filetrans"]["language"],
+                        audio_duration_ms=collected["filetrans"]["audio_duration_ms"],
+                    )
+                    processing_details.add_transcript(
+                        session, value.get("transcript", [])
+                    )
         return collected
 
     async def _run_text_only(
@@ -117,11 +191,13 @@ class Orchestrator:
             "model_errors": [],
             "evidence_weights": evidence_weights,
         }
+        processing_details.set_alignment(session, 0)
 
         await self.store.update_job(
             job_id, JobStatus.analyzing, 66, "Qwen3.7 is analyzing text"
         )
         session.resume_scheduled_jobs.discard(job_id)
+        processing_details.set_qwen(session, ProcessingStage.running)
         result = await self.provider.analyze(
             session={
                 "id": session.id,
@@ -134,6 +210,7 @@ class Orchestrator:
             tracks=[],
             request=request,
         )
+        processing_details.set_qwen(session, ProcessingStage.succeeded)
         enforce_text_only_metadata(result)
         result["_evidence_weights"] = evidence_weights
 
@@ -184,12 +261,46 @@ class Orchestrator:
                         path = Path(upload.completed_path)
                         oss_key = make_oss_key(prefix, session_id, upload.id, path.name)
                         oss_keys.append(oss_key)
-                        await self.oss.upload_file(oss_key, path, upload.mime_type)
-                        audio_url = await self.oss.signed_url(oss_key)
+                        processing_details.set_oss(
+                            session, upload.id, ProcessingStage.running
+                        )
+                        try:
+                            await self.oss.upload_file(oss_key, path, upload.mime_type)
+                            audio_url = await self.oss.signed_url(oss_key)
+                        except Exception:
+                            processing_details.set_oss(
+                                session, upload.id, ProcessingStage.failed
+                            )
+                            raise
+                        processing_details.set_oss(
+                            session, upload.id, ProcessingStage.succeeded
+                        )
                         remote_tracks.append((upload, path, audio_url))
 
+                if not remote_tracks:
+                    skipped = list(processing_details.REMOTE_MODULES)
+                    for upload in completed_uploads:
+                        processing_details.mark_skipped_modules(
+                            session, upload.id, tuple(skipped)
+                        )
+                else:
+                    missing: list[str] = []
+                    if not self.dashscope:
+                        missing.extend(["fun_asr", "emotion"])
+                    if not self.transcription:
+                        missing.append("transcription")
+                    for upload, _, _ in remote_tracks:
+                        processing_details.mark_skipped_modules(
+                            session, upload.id, tuple(missing)
+                        )
+
                 observations = await asyncio.gather(
-                    *(self._collect_remote_observations(item[2]) for item in remote_tracks)
+                    *(
+                        self._collect_remote_observations(
+                            item[2], session=session, upload_id=item[0].id
+                        )
+                        for item in remote_tracks
+                    )
                 )
                 observations_by_upload_id: dict[str, dict[str, Any]] = {}
                 for remote_track, observation in zip(remote_tracks, observations, strict=True):
@@ -206,6 +317,7 @@ class Orchestrator:
                     log.info("Aligned %d segments for session %s", len(aligned), session_id)
                 else:
                     aligned = []
+                processing_details.set_alignment(session, len(aligned))
 
                 quality_metrics: list[dict[str, Any]] = []
                 for upload in completed_uploads:
@@ -244,6 +356,7 @@ class Orchestrator:
                 track_labels = intermediate.get("track_labels", [Path(item).name for item in tracks])
                 model_errors = intermediate.get("model_errors", [])
                 evidence_weights = intermediate.get("evidence_weights") or conservative_evidence_weights(quality_metrics)
+                processing_details.set_alignment(session, len(aligned))
 
             # Check participant resolution before analysis
             if not session.participant_resolution and aligned:
@@ -253,6 +366,7 @@ class Orchestrator:
 
             await self.store.update_job(job_id, JobStatus.analyzing, 66, "Qwen3.7 正在形成回声")
             session.resume_scheduled_jobs.discard(job_id)
+            processing_details.set_qwen(session, ProcessingStage.running)
             result = await self.provider.analyze(
                 session={
                     "id": session.id,
@@ -270,6 +384,7 @@ class Orchestrator:
                 tracks=track_labels,
                 request=request,
             )
+            processing_details.set_qwen(session, ProcessingStage.succeeded)
 
             if result.get("analysis_mode") == "text_only":
                 evidence_weights = conservative_evidence_weights([])
@@ -298,6 +413,12 @@ class Orchestrator:
         except Exception as exc:
             current_progress = self.store.jobs[job_id].progress
             error_detail = str(exc) if isinstance(exc, AnalysisContractError) else None
+            if session.processing.get("qwen_status") == ProcessingStage.running.value:
+                processing_details.set_qwen(
+                    session,
+                    ProcessingStage.failed,
+                    processing_details.safe_error_code(exc),
+                )
             await self.store.update_job(
                 job_id,
                 JobStatus.failed,
@@ -315,3 +436,11 @@ class Orchestrator:
                         await self.oss.delete(key)
                     except Exception:
                         log.warning("OSS cleanup failed for key=%s", key, exc_info=True)
+            try:
+                media_cleanup.remove_session_media(
+                    self.store, session_id, self.media_retention_seconds
+                )
+            except Exception:
+                log.warning(
+                    "Local media cleanup failed session=%s", session_id, exc_info=True
+                )

@@ -49,6 +49,9 @@ class Settings(BaseSettings):
 
     chunk_size_bytes: int = 8 * 1024 * 1024
     max_session_seconds: int = 2 * 60 * 60
+    # Failed jobs keep their local upload copies for this long so retries
+    # remain possible; completed sessions are cleaned immediately.
+    memecho_media_retention_seconds: int = 24 * 60 * 60
 
 
 @lru_cache

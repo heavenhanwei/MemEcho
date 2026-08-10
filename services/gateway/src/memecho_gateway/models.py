@@ -348,3 +348,65 @@ class Health(BaseModel):
     status: Literal["ok"]
     provider: str
     version: str
+
+
+class ProcessingStage(StrEnum):
+    queued = "queued"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    skipped = "skipped"
+
+
+class ModuleDetails(BaseModel):
+    """Sanitized per-module status. Only stable error codes, never raw text."""
+
+    status: ProcessingStage
+    error_code: str | None = None
+    elapsed_ms: int | None = Field(default=None, ge=0)
+
+
+class FileTransDetails(ModuleDetails):
+    sentence_count: int | None = Field(default=None, ge=0)
+    language: str | None = None
+    audio_duration_ms: int | None = Field(default=None, ge=0)
+
+
+class TranscriptSnippet(BaseModel):
+    speaker_id: str
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    text: str = Field(max_length=600)
+
+
+class TrackProcessingDetails(BaseModel):
+    upload_id: str
+    file_name: str
+    track: str
+    mime_type: str
+    size_bytes: int = Field(ge=0)
+    upload_status: ProcessingStage
+    received_chunks: int = Field(ge=0)
+    expected_chunks: int = Field(ge=0)
+    oss_status: ProcessingStage
+    # Keys are module names: fun_asr, emotion, transcription.
+    modules: dict[str, ModuleDetails]
+    filetrans: FileTransDetails
+
+
+class ProcessingDetailsResponse(BaseModel):
+    """Desensitized pipeline observability contract.
+
+    Must never contain API keys, signed URLs, vendor response bodies, or
+    absolute local paths.
+    """
+
+    session_id: str
+    updated_at: datetime
+    tracks: list[TrackProcessingDetails]
+    aligned_segment_count: int = Field(ge=0)
+    submitted_to_qwen: bool
+    qwen_status: ProcessingStage
+    qwen_error_code: str | None = None
+    transcript_segments: list[TranscriptSnippet]
+    transcript_truncated: bool

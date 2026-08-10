@@ -553,6 +553,31 @@ main { min-width: 0; overflow: hidden; }
   .settings-grid { grid-template-columns: 1fr; }
   .settings-page { width: min(100% - 36px, 760px); padding-inline: 0; }
 }
+/* ── BUG-007 observability ─────────────────────────────────────────────── */
+.processing-details { margin-top: 22px; text-align: left; min-width: 340px; max-width: 520px; border: 1px solid rgba(111, 91, 211, 0.16); border-radius: 14px; padding: 14px 16px; background: rgba(255, 255, 255, 0.55); }
+.processing-detail-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: baseline; padding: 3px 0; font-size: 12px; border-bottom: 1px dashed rgba(129, 124, 137, 0.18); }
+.processing-detail-row:last-of-type { border-bottom: none; }
+.processing-detail-name { color: var(--ink); }
+.processing-detail-status { font-weight: 650; }
+.processing-detail-row.stage-succeeded .processing-detail-status { color: #4d8b74; }
+.processing-detail-row.stage-running .processing-detail-status { color: var(--violet); }
+.processing-detail-row.stage-failed .processing-detail-status { color: #a5644e; }
+.processing-detail-row.stage-queued .processing-detail-status, .processing-detail-row.stage-skipped .processing-detail-status { color: var(--muted); }
+.processing-detail-meta { color: var(--muted); font-size: 11px; }
+.processing-detail-hint { color: #a5644e; font-size: 11px; margin: 8px 0 0; }
+
+.official-transcript summary { cursor: pointer; font-weight: 650; color: var(--ink); display: flex; gap: 10px; align-items: baseline; }
+.official-transcript summary small { color: var(--muted); font-weight: 400; font-size: 10px; }
+.official-transcript-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
+.official-transcript-list li { display: grid; grid-template-columns: 92px 110px 1fr; gap: 8px; font-size: 12px; align-items: baseline; }
+.official-transcript-list time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.official-transcript-list b { color: var(--violet); font-weight: 600; overflow-wrap: anywhere; }
+.official-transcript-list p { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+
+.recording-memory-note { color: #a5644e; font-size: 10px; margin: 4px 0; }
+.chunk-recovery-banner { margin: 10px 0; padding: 10px 14px; border-radius: 12px; border: 1px solid rgba(227, 161, 141, 0.5); background: rgba(227, 161, 141, 0.12); font-size: 12px; display: grid; gap: 8px; }
+.chunk-recovery-banner .recovery-actions { display: flex; gap: 8px; }
+
 @keyframes breathe { 50% { transform: scale(1.05) rotate(2deg); } }
 @keyframes shell-breathe { 0% { opacity: .5; transform: scale(.7); } 100% { opacity: 0; transform: scale(1.45); } }
 @keyframes echo-return { 0%,100% { opacity: .16; transform: scale(.78); } 45% { opacity: .5; transform: scale(1.28); } 72% { opacity: .24; transform: scale(.96); } }

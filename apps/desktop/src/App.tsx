@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EchoSphere } from "./components/EchoSphere";
+import { ProcessingDetailsPanel } from "./components/ProcessingDetailsPanel";
 import { ReportView } from "./components/ReportView";
 import { RelationsView } from "./components/RelationsView";
 import {
@@ -27,8 +28,14 @@ import {
   setGatewayToken,
   type GatewayJob,
   type ParticipantCandidate,
+  type ProcessingDetails,
 } from "./lib/api";
 import { startLivePcmCapture, type LivePcmCapture } from "./lib/livePcm";
+import {
+  clearPendingChunks,
+  loadPendingChunks,
+  persistRecordingChunk,
+} from "./lib/chunkStore";
 import {
   bridge,
   isTauriRuntime,
@@ -145,6 +152,7 @@ function NowPage() {
   const audioContext = useRef<AudioContext | null>(null);
   const liveCapture = useRef<LivePcmCapture | null>(null);
   const browserCaptureStop = useRef<(() => Promise<void>) | null>(null);
+  const webChunkIndex = useRef(0);
   const recordingActive = useRef(false);
   const liveSessionId = useRef<string | null>(null);
   const liveRetryTimer = useRef<number | undefined>(undefined);
@@ -172,6 +180,9 @@ function NowPage() {
   const [gatewayOk, setGatewayOk] = useState<boolean | null>(null);
   const [gatewayError, setGatewayError] = useState("");
   const [gatewayProvider, setGatewayProvider] = useState("");
+  const [processingDetails, setProcessingDetails] =
+    useState<ProcessingDetails | null>(null);
+  const [recoveredChunks, setRecoveredChunks] = useState<Blob[] | null>(null);
   const canCaptureBrowserAudio =
     !isTauri && typeof navigator.mediaDevices?.getDisplayMedia === "function";
 
@@ -240,6 +251,60 @@ function NowPage() {
       cancelled = true;
     };
   }, [isTauri]);
+
+  useEffect(() => {
+    if (state.soulState !== "processing") return;
+    const sessionId = useAppStore.getState().sessionId;
+    if (!sessionId) return;
+    let cancelled = false;
+    const refresh = () => {
+      gateway
+        .processingDetails(sessionId)
+        .then((details) => {
+          if (!cancelled) setProcessingDetails(details);
+        })
+        .catch(() => {
+          // Details are supplementary; the main job progress remains authoritative.
+        });
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [state.soulState]);
+
+  useEffect(() => {
+    if (isTauri) return;
+    let cancelled = false;
+    loadPendingChunks()
+      .then((chunks) => {
+        if (!cancelled && chunks.length > 0) setRecoveredChunks(chunks);
+      })
+      .catch(() => {
+        // Persistence is best-effort; never block the page on it.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isTauri]);
+
+  function downloadRecoveredChunks() {
+    if (!recoveredChunks || recoveredChunks.length === 0) return;
+    const blob = new Blob(recoveredChunks, { type: "audio/webm" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "memecho-recovered.webm";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function discardRecoveredChunks() {
+    await clearPendingChunks().catch(() => undefined);
+    setRecoveredChunks(null);
+  }
 
   const retryGatewayCheck = useCallback(async () => {
     setGatewayOk(null);
@@ -452,6 +517,7 @@ function NowPage() {
     workflow.current = null;
     setIdentityCandidates([]);
     setCanRetry(false);
+    setProcessingDetails(null);
     try {
       const session = await gateway.createSession("新的回声", source);
       liveSessionId.current = session.id;
@@ -480,9 +546,15 @@ function NowPage() {
         stream.current = browserCapture.media;
         browserCaptureStop.current = browserCapture.stop;
         browserRecordingChunks.current = [];
+        webChunkIndex.current = 0;
         recorder.current = new MediaRecorder(browserCapture.media);
         recorder.current.ondataavailable = (event) => {
-          if (event.data.size > 0) browserRecordingChunks.current.push(event.data);
+          if (event.data.size > 0) {
+            browserRecordingChunks.current.push(event.data);
+            const chunkIndex = webChunkIndex.current;
+            webChunkIndex.current += 1;
+            void persistRecordingChunk(chunkIndex, event.data).catch(() => undefined);
+          }
         };
         recorder.current.start(1000);
         startLiveAudio(browserCapture.media);
@@ -667,6 +739,8 @@ function NowPage() {
         );
         context.uploaded = true;
         context.webRecording = undefined;
+        void clearPendingChunks().catch(() => undefined);
+        setRecoveredChunks(null);
       } else if (!context.localSessionId && !context.uploaded) {
         throw new Error("浏览器录音不可用，请重新录制");
       }
@@ -915,6 +989,7 @@ function NowPage() {
             <RotateCcw size={15} /> {workflowBusy ? "正在重试…" : "重试当前步骤"}
           </button>
         )}
+        <ProcessingDetailsPanel details={processingDetails} />
       </section>
     );
   }
@@ -1035,6 +1110,11 @@ function NowPage() {
             <p className="live-caption">{state.caption}</p>
             <p className={`live-connection ${liveStatus}`}>{liveStatusLabel[liveStatus]}</p>
             {meterNote && <p className="meter-note">{meterNote}</p>}
+            {!isTauri && (
+              <p className="recording-memory-note">
+                停止前录音仅保存在本页内存，并分块缓存到浏览器本地；刷新或关闭页面会中断录音。
+              </p>
+            )}
             <div>
               <button onClick={togglePause}>
                 {state.soulState === "paused" ? <Play size={17} /> : <Pause size={17} />}
@@ -1075,6 +1155,29 @@ function NowPage() {
           />
         </label>
       </div>
+      {!isTauri &&
+        recoveredChunks &&
+        recoveredChunks.length > 0 &&
+        state.soulState === "idle" && (
+          <div className="chunk-recovery-banner" role="status">
+            <p>
+              检测到上次未上传完成的浏览器录音缓存（{recoveredChunks.length}{" "}
+              个分块）。可以下载保存，或清除缓存。
+            </p>
+            <div className="recovery-actions">
+              <button type="button" onClick={downloadRecoveredChunks}>
+                下载缓存录音
+              </button>
+              <button
+                type="button"
+                className="danger"
+                onClick={() => void discardRecoveredChunks()}
+              >
+                清除
+              </button>
+            </div>
+          </div>
+        )}
       {gatewayOk === false && (
         <div className="error-banner" role="alert">
           <p>{gatewayError}</p>

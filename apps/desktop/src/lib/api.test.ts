@@ -114,6 +114,29 @@ describe("gateway session analysis APIs", () => {
     expect(fetchMock.mock.calls[3][0]).toContain("/sessions/session%2F1/result");
   });
 
+  it("reads sanitized processing details for the session", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(responseJson({
+      session_id: "session-1",
+      updated_at: "2026-01-01T00:00:00Z",
+      tracks: [],
+      aligned_segment_count: 0,
+      submitted_to_qwen: false,
+      qwen_status: "queued",
+      qwen_error_code: null,
+      transcript_segments: [],
+      transcript_truncated: false,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(gateway.processingDetails("session/1")).resolves.toMatchObject({
+      session_id: "session-1",
+      qwen_status: "queued",
+    });
+    expect(fetchMock.mock.calls[0][0]).toContain(
+      "/sessions/session%2F1/processing-details",
+    );
+  });
+
   it("keeps HTTP errors bounded and redacts gateway and Bearer tokens", async () => {
     const detail = `change-me Bearer super-secret ${"x".repeat(2000)}`;
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(responseJson({ detail }, 502)));

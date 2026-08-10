@@ -21,7 +21,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from . import __version__
+from . import __version__, media_cleanup, processing_details
 from .config import Settings, get_settings
 from .models import (
     AnalysisRequest,
@@ -35,6 +35,8 @@ from .models import (
     ParticipantCandidate,
     ParticipantResolution,
     ParticipantsCandidatesResponse,
+    ProcessingDetailsResponse,
+    ProcessingStage,
     SessionCreate,
     SessionCreated,
     UploadComplete,
@@ -99,13 +101,26 @@ provider = BailianProvider(settings) if not is_mock else MockProvider()
 oss_client = AliyunOSSClient(settings, mock=is_mock)
 dashscope_client = DashScopeClient(settings, mock=is_mock)
 transcription_downloader = TranscriptionDownloader(settings, mock=is_mock)
-orchestrator = Orchestrator(store, provider, oss_client, dashscope_client, transcription_downloader)
+orchestrator = Orchestrator(
+    store,
+    provider,
+    oss_client,
+    dashscope_client,
+    transcription_downloader,
+    media_retention_seconds=settings.memecho_media_retention_seconds,
+)
 realtime_client_factory = BailianRealtimeClient
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.memecho_data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        media_cleanup.sweep_expired_media(
+            store, settings.memecho_media_retention_seconds
+        )
+    except Exception:
+        pass
     yield
 
 
@@ -179,6 +194,10 @@ async def create_upload(session_id: str, payload: UploadCreate) -> UploadCreated
         directory,
     )
     session.uploads[upload_id] = record
+    expected_chunks = (payload.size + settings.chunk_size_bytes - 1) // settings.chunk_size_bytes
+    processing_details.set_upload(
+        session, record, ProcessingStage.queued, expected_chunks
+    )
     return UploadCreated(
         upload_id=upload_id,
         chunk_size=settings.chunk_size_bytes,
@@ -218,9 +237,11 @@ async def put_chunk(
         if part_path.read_bytes() != body:
             raise HTTPException(status_code=409, detail="chunk content mismatch")
         upload.chunks.add(index)
+        processing_details.upsert_track(session, upload)
         return {"ok": True, "index": index}
     part_path.write_bytes(body)
     upload.chunks.add(index)
+    processing_details.upsert_track(session, upload)
     return {"ok": True, "index": index}
 
 
@@ -242,6 +263,7 @@ async def complete_upload(
 
     # Idempotent: if already completed, return existing result with sha256
     if upload.completed_path and upload.completed_path.exists():
+        processing_details.mark_upload_completed(session, upload)
         return {
             "upload_id": upload_id,
             "path": f"asset://{upload_id}",
@@ -269,6 +291,7 @@ async def complete_upload(
     upload.sha256 = digest.hexdigest()
     for part in upload.directory.glob("*.part"):
         part.unlink(missing_ok=True)
+    processing_details.mark_upload_completed(session, upload)
     return {
         "upload_id": upload_id,
         "path": f"asset://{upload_id}",
@@ -408,6 +431,20 @@ async def get_result(session_id: str) -> AnalysisResult:
     if not session.result:
         raise HTTPException(status_code=409, detail="result not ready")
     return session.result
+
+
+@app.get(
+    "/v1/sessions/{session_id}/processing-details",
+    response_model=ProcessingDetailsResponse,
+    dependencies=[Depends(require_token)],
+)
+async def get_processing_details(session_id: str) -> ProcessingDetailsResponse:
+    """Sanitized pipeline observability: no keys, signed URLs, vendor bodies,
+    or absolute paths are ever included."""
+    session = store.sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="session not found")
+    return processing_details.build_response(session)
 
 
 @app.get(

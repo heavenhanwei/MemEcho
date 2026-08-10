@@ -3,6 +3,8 @@ import { ArrowLeft, CheckCircle2, MessageCircle, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { gateway } from "../lib/api";
 import { bridge, type EvidenceTrack } from "../lib/tauri";
+import { useAppStore } from "../store";
+import { OfficialTranscript } from "./OfficialTranscript";
 
 type VadMetric = "v" | "a" | "d";
 
@@ -137,6 +139,7 @@ export function ReportView({
   const [playingEvidenceId, setPlayingEvidenceId] = useState<string | null>(null);
   const [clipUrl, setClipUrl] = useState<string | null>(null);
   const [clipStatus, setClipStatus] = useState<string>("");
+  const gatewaySessionId = useAppStore((state) => state.sessionId);
   useEffect(() => {
     return () => {
       if (clipUrl) URL.revokeObjectURL(clipUrl);
@@ -333,6 +336,10 @@ export function ReportView({
             ))}
           </div>
         </article>
+        <OfficialTranscript
+          sessionId={gatewaySessionId}
+          speakerNames={participantNames}
+        />
         <article className="glass-card span-two evidence-card">
           <div className="card-title">
             <span>证据与不确定性</span>

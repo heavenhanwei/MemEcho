@@ -238,6 +238,58 @@ export interface SessionArtifacts {
   contents: { json: string; markdown: string; html: string };
 }
 
+export type ProcessingStage =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "skipped";
+
+export interface ProcessingModuleDetails {
+  status: ProcessingStage;
+  error_code?: string | null;
+  elapsed_ms?: number | null;
+}
+
+export interface FileTransProcessingDetails extends ProcessingModuleDetails {
+  sentence_count?: number | null;
+  language?: string | null;
+  audio_duration_ms?: number | null;
+}
+
+export interface TranscriptSnippet {
+  speaker_id: string;
+  start_ms: number;
+  end_ms: number;
+  text: string;
+}
+
+export interface TrackProcessingDetails {
+  upload_id: string;
+  file_name: string;
+  track: string;
+  mime_type: string;
+  size_bytes: number;
+  upload_status: ProcessingStage;
+  received_chunks: number;
+  expected_chunks: number;
+  oss_status: ProcessingStage;
+  modules: Record<string, ProcessingModuleDetails>;
+  filetrans: FileTransProcessingDetails;
+}
+
+export interface ProcessingDetails {
+  session_id: string;
+  updated_at: string;
+  tracks: TrackProcessingDetails[];
+  aligned_segment_count: number;
+  submitted_to_qwen: boolean;
+  qwen_status: ProcessingStage;
+  qwen_error_code?: string | null;
+  transcript_segments: TranscriptSnippet[];
+  transcript_truncated: boolean;
+}
+
 function parseSseBlock<T>(block: string): T | undefined {
   const data = block
     .split(/\r?\n/)
@@ -372,6 +424,10 @@ export const gateway = {
     }),
   artifacts: (sessionId: string) =>
     request<SessionArtifacts>(`/v1/sessions/${id(sessionId)}/artifacts`),
+  processingDetails: (sessionId: string) =>
+    request<ProcessingDetails>(
+      `/v1/sessions/${id(sessionId)}/processing-details`,
+    ),
   result: (sessionId: string) =>
     request<AnalysisResult>(`/v1/sessions/${id(sessionId)}/result`),
   chat: async (
