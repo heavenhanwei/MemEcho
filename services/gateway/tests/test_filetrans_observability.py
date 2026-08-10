@@ -216,6 +216,7 @@ def client(tmp_path, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "memecho_data_dir", tmp_path)
     monkeypatch.setattr(settings, "chunk_size_bytes", 4)
+    monkeypatch.setattr(settings, "memecho_demo_token", "change-me")
     store.data_dir = tmp_path
     store.sessions.clear()
     store.jobs.clear()
