@@ -487,6 +487,11 @@ class Orchestrator:
             processing_details.set_qwen(session, ProcessingStage.succeeded)
 
             if result.get("analysis_mode") == "text_only":
+                # Providers may conservatively downgrade an audio session when
+                # usable acoustic evidence is absent. Apply the same
+                # deterministic metadata guarantees as an explicit text input
+                # before contract validation.
+                enforce_text_only_metadata(result)
                 evidence_weights = conservative_evidence_weights([])
             for point in result.get("vad_series", []):
                 point["linguistic_weight"] = evidence_weights["linguistic_weight"]
