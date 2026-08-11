@@ -15,15 +15,21 @@
 
 ## 工程文档
 
-- [系统架构](architecture.md)
-- [连通性审计](connectivity-audit.md)
-- [FileTrans 异步接口](filetrans-async-interface.md)
-- [Gateway 本地配置](gateway-setup.md)
-- [部署说明](deployment.md)
-- [Windows 发布](windows-release.md)
-- [发布门禁](release-checklist.md)
-- [路演验收](roadshow-acceptance.md)
-- [缺陷记录](bugs/)
+工程文档按版本号归档：当前版本的全部文档位于 `docs/v0.1.0/`，后续版本新建 `docs/v<版本号>/` 目录归档，本索引始终指向最新版本。
+
+### v0.1.0（当前版本）
+
+- [项目状态与功能清单](v0.1.0/project-status.md)
+- [系统架构](v0.1.0/architecture.md)
+- [连通性审计](v0.1.0/connectivity-audit.md)
+- [FileTrans 异步接口](v0.1.0/filetrans-async-interface.md)
+- [Gateway 本地配置](v0.1.0/gateway-setup.md)
+- [部署说明](v0.1.0/deployment.md)
+- [Windows 发布](v0.1.0/windows-release.md)
+- [发布门禁](v0.1.0/release-checklist.md)
+- [路演验收](v0.1.0/roadshow-acceptance.md)
+- [前端性能测量](v0.1.0/frontend-performance.md)
+- [缺陷记录](v0.1.0/bugs/)
 
 ## memEcho 项目内的其他资产
 
@@ -42,7 +48,7 @@
 2026-08-11 对 QoderCLI、Mimo、OpenCode 和集成 worktree 做了补丁等价性审计：
 
 - 音频捕获、实时字幕、Gateway 生产适配、文本导入、报告证据回听、历史会话、关系数据、发布门禁等成果均已由等价或更新实现进入 `integration/roadshow-v0`。
-- 连通性审计文档此前只存在于 Agent 分支，现已归入 `docs/connectivity-audit.*`。
+- 连通性审计文档此前只存在于 Agent 分支，现已归入 `docs/v0.1.0/connectivity-audit.*`。
 - 旧分支中与主线不同的历史会话、Gateway 启动和发布门禁补丁已被主线的更新实现覆盖，不再重复合并，以免功能回退。
 - OpenCode realtime worktree 中只剩未完成的未使用 import，没有功能实现或测试价值，不作为工程成果归档。
 

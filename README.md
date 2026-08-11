@@ -23,10 +23,12 @@ python services/gateway/scripts/generate_types.py --check
 
 ## 交付文档
 
-- [SAE / ALB / OSS 与生产容器部署](docs/deployment.md)
-- [Windows MSI / NSIS 构建](docs/windows-release.md)
-- [路演版发布验收清单](docs/release-checklist.md)
-- [产品端到端验收矩阵](docs/roadshow-acceptance.md)
+工程文档按版本归档，当前版本位于 `docs/v0.1.0/`，完整索引见 [工程内容地图](docs/project-content-map.md)。
+
+- [SAE / ALB / OSS 与生产容器部署](docs/v0.1.0/deployment.md)
+- [Windows MSI / NSIS 构建](docs/v0.1.0/windows-release.md)
+- [路演版发布验收清单](docs/v0.1.0/release-checklist.md)
+- [产品端到端验收矩阵](docs/v0.1.0/roadshow-acceptance.md)
 
 ## 本地启动
 
