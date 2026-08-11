@@ -167,6 +167,10 @@ afterEach(() => {
 describe("App (web preview)", () => {
   it("shows the recording entry and the web demo note", () => {
     render(<App />);
+    expect(screen.getByRole("img", { name: "memEcho" })).toHaveAttribute(
+      "src",
+      "/brand/memecho-wordmark.svg",
+    );
     expect(screen.getByText("点击球体，开始录音")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /麦克风＋标签页声音/ })).toBeDisabled();
     expect(screen.getByText(/网页调试模式/)).toBeInTheDocument();

@@ -1880,9 +1880,8 @@ export function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <button className="brand" onClick={() => setPage("now")}>
-          <span className="brand-symbol">◌</span>
-          mem<span>Echo</span>
+        <button className="brand" aria-label="返回此刻" onClick={() => setPage("now")}>
+          <img src="/brand/memecho-wordmark.svg" alt="memEcho" />
         </button>
         <p>让每一次回应，都成为理解自己的入口</p>
         <button className="avatar">M</button>

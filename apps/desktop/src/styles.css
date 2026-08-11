@@ -43,9 +43,17 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   top: 0;
   z-index: 30;
 }
-.brand { border: 0; background: none; font-weight: 750; font-size: 22px; justify-self: start; }
-.brand span { color: var(--violet); }
-.brand-symbol { margin-right: 8px; display: inline-block; }
+.brand {
+  border: 0;
+  background: none;
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border-radius: 10px;
+}
+.brand img { display: block; width: 136px; height: auto; }
+.brand:focus-visible { outline: 2px solid var(--violet); outline-offset: 5px; }
 .topbar > p { margin: 0; color: var(--muted); font-size: 11px; letter-spacing: 0.16em; }
 .avatar { justify-self: end; width: 38px; height: 38px; border: 0; border-radius: 50%; background: var(--ink); color: white; }
 .side-nav {
