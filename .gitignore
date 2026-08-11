@@ -16,4 +16,18 @@ coverage/
 artifacts/
 tmp/
 .mimocode/
+*.tsbuildinfo
+
+# Local agent/runtime state. Engineering outcomes belong in the tracked tree,
+# while sessions, logs, worktrees, credentials, and test sandboxes do not.
+.integration/
+.mimo/
+.mimo-config/
+.mimo-state/
+.qoder/
+.qoder-config/
+.runtime/
+.test-tmp/
+.patch-probe
+memecho-agent-worktrees/
 
