@@ -82,7 +82,7 @@ function filetransDetail(track: TrackProcessingDetails): string | undefined {
 
   if (phase === "polling" || phase === "downloading" || phase === "normalizing") {
     const parts: string[] = [];
-    if (ft.poll_attempts > 0) {
+    if ((ft.poll_attempts ?? 0) > 0) {
       parts.push(`第 ${ft.poll_attempts} 次查询`);
     }
     if (ft.elapsed_ms != null && ft.elapsed_ms > 0) {
@@ -97,7 +97,7 @@ function filetransDetail(track: TrackProcessingDetails): string | undefined {
   }
 
   // Non-terminal phases (not_started, submitting, queued): show phase label.
-  return filetransPhaseLabel[phase];
+  return phase ? filetransPhaseLabel[phase] : undefined;
 }
 
 function trackRows(track: TrackProcessingDetails) {

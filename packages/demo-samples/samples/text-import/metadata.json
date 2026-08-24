@@ -1,0 +1,9 @@
+{
+  "id": "demo-text-001",
+  "title": "周会转写文本",
+  "source_mode": "import",
+  "source_name": "weekly-standup.txt",
+  "started_at": "2026-08-13T10:00:00+08:00",
+  "duration_secs": 0,
+  "status": "completed"
+}

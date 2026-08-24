@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,6 +9,9 @@ from typing import Any
 from uuid import uuid4
 
 from .models import JobStatus, JobView, SessionCreate
+from . import persistence
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -100,4 +104,231 @@ class MemoryStore:
         self.jobs[job_id] = updated
         await self.events[job_id].put(updated.model_dump(mode="json"))
         return updated
+
+
+class PersistentStore(MemoryStore):
+    """Persistent store backed by SQLite. Survives process restarts."""
+
+    def __init__(self, data_dir: Path, db_path: Path | None = None):
+        super().__init__(data_dir)
+        self.db_path = db_path or (data_dir / "gateway.db")
+        self._initialized = False
+
+    async def initialize(self) -> None:
+        """Initialize database and load persisted state."""
+        if self._initialized:
+            return
+
+        persistence.init_db(self.db_path)
+        await self._load_state()
+        self._initialized = True
+        log.info("PersistentStore initialized from %s", self.db_path)
+
+    async def _load_state(self) -> None:
+        """Load all persisted state into memory."""
+        # Load sessions
+        sessions_data = persistence.load_all_sessions(self.db_path)
+        for session_id, data in sessions_data.items():
+            create = SessionCreate(
+                title=data["title"],
+                context=data["context"],
+                occurred_at=data["occurred_at"],
+                source_mode=data["source_mode"],
+                marks=data["marks"],
+            )
+            record = SessionRecord(
+                id=session_id,
+                request_id=data["request_id"],
+                create=create,
+                participant_resolution=data["participant_resolution"],
+                result=data["result"],
+                processing=data["processing"],
+            )
+            self.sessions[session_id] = record
+
+        # Load uploads and attach to sessions
+        uploads_data = persistence.load_all_uploads(self.db_path)
+        for upload_id, data in uploads_data.items():
+            session_id = data["session_id"]
+            if session_id in self.sessions:
+                upload = UploadRecord(
+                    id=upload_id,
+                    session_id=session_id,
+                    track=data["track"],
+                    file_name=data["file_name"],
+                    mime_type=data["mime_type"],
+                    size=data["size"],
+                    sha256=data["sha256"],
+                    directory=Path(data["directory"]),
+                    chunks=data["chunks"],
+                    completed_path=Path(data["completed_path"]) if data["completed_path"] else None,
+                )
+                self.sessions[session_id].uploads[upload_id] = upload
+
+        # Load jobs
+        jobs_data = persistence.load_all_jobs(self.db_path)
+        for job_id, data in jobs_data.items():
+            job = JobView(
+                id=job_id,
+                session_id=data["session_id"],
+                request_id=data["request_id"],
+                status=JobStatus(data["status"]),
+                progress=data["progress"],
+                stage_label=data["stage_label"],
+                retryable=data["retryable"],
+                error_code=data["error_code"],
+                error_detail=data["error_detail"],
+                created_at=data["created_at"],
+                updated_at=data["updated_at"],
+            )
+            self.jobs[job_id] = job
+            self.events[job_id] = asyncio.Queue()
+
+        # Load idempotency mappings
+        self.idempotency = persistence.load_idempotency(self.db_path)
+
+        # Load analysis requests and attach to sessions
+        analysis_requests = persistence.load_analysis_requests(self.db_path)
+        for job_id, request_data in analysis_requests.items():
+            if job_id in self.jobs:
+                session_id = self.jobs[job_id].session_id
+                if session_id in self.sessions:
+                    self.sessions[session_id].analysis_requests[job_id] = request_data
+
+        # Load job intermediates and attach to sessions
+        intermediates = persistence.load_job_intermediates(self.db_path)
+        for job_id, intermediate_data in intermediates.items():
+            if job_id in self.jobs:
+                session_id = self.jobs[job_id].session_id
+                if session_id in self.sessions:
+                    self.sessions[session_id].job_intermediates[job_id] = intermediate_data
+
+        # Load resume scheduled jobs
+        resume_jobs = persistence.load_resume_scheduled_jobs(self.db_path)
+        for session_id, job_ids in resume_jobs.items():
+            if session_id in self.sessions:
+                self.sessions[session_id].resume_scheduled_jobs = job_ids
+
+        log.info(
+            "Loaded %d sessions, %d jobs from persistence",
+            len(self.sessions),
+            len(self.jobs),
+        )
+
+    async def create_session(self, payload: SessionCreate) -> SessionRecord:
+        record = await super().create_session(payload)
+        # Persist to database
+        persistence.save_session(
+            self.db_path,
+            record.id,
+            record.request_id,
+            payload.model_dump(mode="json"),
+        )
+        return record
+
+    async def create_job(self, session_id: str, request_id: str) -> JobView:
+        job = await super().create_job(session_id, request_id)
+        # Persist to database
+        persistence.save_job(
+            self.db_path,
+            job.id,
+            session_id,
+            request_id,
+            job.status,
+            job.progress,
+            job.stage_label,
+            job.retryable,
+            job.error_code,
+            job.error_detail,
+            job.created_at,
+            job.updated_at,
+        )
+        persistence.save_idempotency(self.db_path, request_id, job.id)
+        return job
+
+    async def update_job(
+        self,
+        job_id: str,
+        status: JobStatus,
+        progress: int,
+        label: str,
+        **extra: Any,
+    ) -> JobView:
+        job = await super().update_job(job_id, status, progress, label, **extra)
+        # Persist to database
+        persistence.update_job_status(
+            self.db_path,
+            job_id,
+            status,
+            progress,
+            label,
+            retryable=extra.get("retryable", False),
+            error_code=extra.get("error_code"),
+            error_detail=extra.get("error_detail"),
+        )
+        # Also persist processing state if session exists
+        if job.session_id in self.sessions:
+            session = self.sessions[job.session_id]
+            if session.processing:
+                persistence.update_session_processing(
+                    self.db_path, job.session_id, session.processing
+                )
+        return job
+
+    def save_upload(self, upload: UploadRecord) -> None:
+        """Persist an upload record."""
+        persistence.save_upload(
+            self.db_path,
+            upload.id,
+            upload.session_id,
+            upload.track,
+            upload.file_name,
+            upload.mime_type,
+            upload.size,
+            upload.sha256,
+            str(upload.directory),
+            upload.chunks,
+            str(upload.completed_path) if upload.completed_path else None,
+        )
+
+    def update_upload_chunks(self, upload: UploadRecord) -> None:
+        """Persist upload chunks update."""
+        persistence.update_upload_chunks(self.db_path, upload.id, upload.chunks)
+
+    def mark_upload_completed(self, upload: UploadRecord) -> None:
+        """Persist upload completion."""
+        if upload.completed_path:
+            persistence.update_upload_completed(
+                self.db_path, upload.id, str(upload.completed_path)
+            )
+
+    def save_analysis_request(self, job_id: str, request_data: dict[str, Any]) -> None:
+        """Persist analysis request data."""
+        persistence.save_analysis_request(self.db_path, job_id, request_data)
+
+    def save_job_intermediate(self, job_id: str, intermediate_data: dict[str, Any]) -> None:
+        """Persist job intermediate data."""
+        persistence.save_job_intermediate(self.db_path, job_id, intermediate_data)
+
+    def save_participant_resolution(self, session_id: str, resolution: dict[str, Any]) -> None:
+        """Persist participant resolution."""
+        persistence.update_session_participant_resolution(
+            self.db_path, session_id, resolution
+        )
+
+    def save_session_result(self, session_id: str, result: dict[str, Any]) -> None:
+        """Persist session result."""
+        persistence.update_session_result(self.db_path, session_id, result)
+
+    def save_processing_state(self, session_id: str, processing: dict[str, Any]) -> None:
+        """Persist processing state."""
+        persistence.update_session_processing(self.db_path, session_id, processing)
+
+    def save_resume_scheduled_job(self, session_id: str, job_id: str) -> None:
+        """Persist resume scheduled job."""
+        persistence.save_resume_scheduled_job(self.db_path, session_id, job_id)
+
+    def get_unfinished_jobs(self) -> list[dict[str, Any]]:
+        """Get jobs that were in progress when the server stopped."""
+        return persistence.get_unfinished_jobs(self.db_path)
 

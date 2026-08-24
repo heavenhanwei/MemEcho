@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # Failed jobs keep their local upload copies for this long so retries
     # remain possible; completed sessions are cleaned immediately.
     memecho_media_retention_seconds: int = 24 * 60 * 60
+    # Path to the SQLite database file for persistent state. Empty = use
+    # ``{memecho_data_dir}/gateway.db``.
+    memecho_db_path: Path | None = None
 
 
 @lru_cache

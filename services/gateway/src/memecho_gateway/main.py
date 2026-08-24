@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import logging
 import re
 import asyncio
 import hashlib
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
+
+import httpx
 
 from fastapi import (
     BackgroundTasks,
@@ -20,6 +24,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from . import __version__, media_cleanup, processing_details
 from .config import Settings, get_settings
@@ -43,7 +48,7 @@ from .models import (
     UploadCreate,
     UploadCreated,
 )
-from .orchestrator import Orchestrator
+from .orchestrator import Orchestrator, ProviderOverrides
 from .providers import (
     AliyunOSSClient,
     BailianProvider,
@@ -56,11 +61,11 @@ from .realtime import (
     RealtimeConfigurationError,
     RealtimeUpstreamDisconnected,
 )
-from .store import MemoryStore, UploadRecord
+from .store import MemoryStore, PersistentStore, UploadRecord
 
 
 settings = get_settings()
-store = MemoryStore(settings.memecho_data_dir)
+store = PersistentStore(settings.memecho_data_dir, settings.memecho_db_path)
 
 SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]")
 WINDOWS_RESERVED_NAMES = {
@@ -112,9 +117,30 @@ orchestrator = Orchestrator(
 realtime_client_factory = BailianRealtimeClient
 
 
+log = logging.getLogger(__name__)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.memecho_data_dir.mkdir(parents=True, exist_ok=True)
+    # Initialize persistent store and load persisted state
+    await store.initialize()
+    # Mark unfinished jobs as failed so they can be retried
+    for job_info in store.get_unfinished_jobs():
+        job_id = job_info["id"]
+        session_id = job_info["session_id"]
+        if session_id in store.sessions:
+            try:
+                await store.update_job(
+                    job_id,
+                    JobStatus.failed,
+                    job_info["progress"],
+                    "Gateway 重启，任务中断",
+                    retryable=True,
+                    error_code="gateway_restart",
+                )
+            except Exception:
+                log.warning("Failed to mark job %s as restart-interrupted", job_id)
     try:
         media_cleanup.sweep_expired_media(
             store, settings.memecho_media_retention_seconds
@@ -140,8 +166,42 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type",
+        "X-LLM-Text-Api-Key", "X-LLM-Text-Endpoint", "X-LLM-Text-Model",
+        "X-LLM-Audio-Api-Key", "X-LLM-Audio-Endpoint", "X-LLM-Workspace-Id",
+    ],
 )
+
+
+@app.middleware("http")
+async def llm_config_middleware(request: Request, call_next):
+    """Attach per-request LLM config from X-LLM-* headers."""
+    request.state.llm_text_api_key = request.headers.get("X-LLM-Text-Api-Key", "")
+    request.state.llm_text_endpoint = request.headers.get("X-LLM-Text-Endpoint", "")
+    request.state.llm_text_model = request.headers.get("X-LLM-Text-Model", "")
+    request.state.llm_audio_api_key = request.headers.get("X-LLM-Audio-Api-Key", "")
+    request.state.llm_audio_endpoint = request.headers.get("X-LLM-Audio-Endpoint", "")
+    request.state.llm_workspace_id = request.headers.get("X-LLM-Workspace-Id", "")
+    response = await call_next(request)
+    return response
+
+
+def resolve_text_settings(request: Request) -> dict:
+    """Effective text LLM settings: request headers > .env defaults."""
+    return {
+        "api_key": getattr(request.state, "llm_text_api_key", "") or settings.bailian_text_api_key,
+        "base_url": getattr(request.state, "llm_text_endpoint", "") or settings.bailian_text_base_url,
+        "model": getattr(request.state, "llm_text_model", "") or settings.bailian_text_model,
+    }
+
+
+def resolve_audio_settings(request: Request) -> dict:
+    """Effective audio ASR settings: request headers > .env defaults."""
+    return {
+        "api_key": getattr(request.state, "llm_audio_api_key", "") or settings.bailian_audio_api_key,
+        "base_url": getattr(request.state, "llm_audio_endpoint", "") or settings.bailian_audio_base_url,
+        "workspace_id": getattr(request.state, "llm_workspace_id", "") or settings.bailian_workspace_id,
+    }
 
 
 def require_token(
@@ -156,6 +216,62 @@ def require_token(
 @app.get("/v1/health", response_model=Health)
 async def health() -> Health:
     return Health(status="ok", provider=settings.memecho_provider, version=__version__)
+
+
+class LlmTestRequest(BaseModel):
+    kind: Literal["text", "audio"]
+
+
+class LlmTestResponse(BaseModel):
+    ok: bool
+    error: str | None = None
+
+
+@app.post("/v1/llm/test", response_model=LlmTestResponse, dependencies=[Depends(require_token)])
+async def test_llm_connection(request: Request, payload: LlmTestRequest) -> LlmTestResponse:
+    """Verify user-supplied LLM credentials with a minimal request."""
+    if payload.kind == "text":
+        resolved = resolve_text_settings(request)
+        if not resolved["api_key"] or not resolved["base_url"]:
+            return LlmTestResponse(ok=False, error="缺少 API Key 或 Endpoint")
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    f"{resolved['base_url'].rstrip('/')}/chat/completions",
+                    headers={"Authorization": f"Bearer {resolved['api_key']}"},
+                    json={
+                        "model": resolved["model"],
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "max_tokens": 1,
+                    },
+                )
+                if resp.status_code == 200:
+                    return LlmTestResponse(ok=True)
+                return LlmTestResponse(ok=False, error=f"上游返回 HTTP {resp.status_code}")
+        except Exception as e:
+            return LlmTestResponse(ok=False, error=f"连接失败: {type(e).__name__}")
+
+    elif payload.kind == "audio":
+        resolved = resolve_audio_settings(request)
+        if not resolved["api_key"] or not resolved["base_url"]:
+            return LlmTestResponse(ok=False, error="缺少 API Key 或 Endpoint")
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{resolved['base_url'].rstrip('/')}/api/v1/services/audio/asr/transcription",
+                    headers={"Authorization": f"Bearer {resolved['api_key']}"},
+                )
+                # DashScope transcription expects POST with JSON body; a bare
+                # GET will return 400/405/404 etc.  Any 4xx confirms the
+                # endpoint is reachable and the auth header was processed.
+                # Only 5xx and connection errors indicate infrastructure failure.
+                if resp.status_code < 500:
+                    return LlmTestResponse(ok=True)
+                return LlmTestResponse(ok=False, error=f"上游返回 HTTP {resp.status_code}")
+        except Exception as e:
+            return LlmTestResponse(ok=False, error=f"连接失败: {type(e).__name__}")
+
+    return LlmTestResponse(ok=False, error=f"未知的 kind: {payload.kind}")
 
 
 @app.post(
@@ -194,6 +310,7 @@ async def create_upload(session_id: str, payload: UploadCreate) -> UploadCreated
         directory,
     )
     session.uploads[upload_id] = record
+    store.save_upload(record)
     expected_chunks = (payload.size + settings.chunk_size_bytes - 1) // settings.chunk_size_bytes
     processing_details.set_upload(
         session, record, ProcessingStage.queued, expected_chunks
@@ -237,10 +354,12 @@ async def put_chunk(
         if part_path.read_bytes() != body:
             raise HTTPException(status_code=409, detail="chunk content mismatch")
         upload.chunks.add(index)
+        store.update_upload_chunks(upload)
         processing_details.upsert_track(session, upload)
         return {"ok": True, "index": index}
     part_path.write_bytes(body)
     upload.chunks.add(index)
+    store.update_upload_chunks(upload)
     processing_details.upsert_track(session, upload)
     return {"ok": True, "index": index}
 
@@ -289,6 +408,7 @@ async def complete_upload(
         raise HTTPException(status_code=422, detail="upload checksum mismatch")
     upload.completed_path = target
     upload.sha256 = digest.hexdigest()
+    store.mark_upload_completed(upload)
     for part in upload.directory.glob("*.part"):
         part.unlink(missing_ok=True)
     processing_details.mark_upload_completed(session, upload)
@@ -311,6 +431,7 @@ async def resolve_participants(
     if not session:
         raise HTTPException(status_code=404, detail="session not found")
     session.participant_resolution = payload.model_dump()
+    store.save_participant_resolution(session_id, session.participant_resolution)
 
     job = awaiting_identity_job(session_id)
     if job and job.id not in session.resume_scheduled_jobs:
@@ -318,6 +439,7 @@ async def resolve_participants(
         if original_request is None:
             raise HTTPException(status_code=409, detail="analysis request is unavailable")
         session.resume_scheduled_jobs.add(job.id)
+        store.save_resume_scheduled_job(session_id, job.id)
         background.add_task(
             orchestrator.run, job.id, session_id, original_request.copy()
         )
@@ -367,7 +489,7 @@ async def get_participant_candidates(session_id: str) -> ParticipantsCandidatesR
     dependencies=[Depends(require_token)],
 )
 async def analyze(
-    session_id: str, payload: AnalysisRequest, background: BackgroundTasks
+    session_id: str, payload: AnalysisRequest, request: Request, background: BackgroundTasks
 ) -> JobView:
     if session_id not in store.sessions:
         raise HTTPException(status_code=404, detail="session not found")
@@ -381,13 +503,22 @@ async def analyze(
             status_code=422,
             detail="text source cannot be combined with media uploads",
         )
+    overrides = ProviderOverrides(
+        text_api_key=getattr(request.state, "llm_text_api_key", ""),
+        text_endpoint=getattr(request.state, "llm_text_endpoint", ""),
+        text_model=getattr(request.state, "llm_text_model", ""),
+        audio_api_key=getattr(request.state, "llm_audio_api_key", ""),
+        audio_endpoint=getattr(request.state, "llm_audio_endpoint", ""),
+        workspace_id=getattr(request.state, "llm_workspace_id", ""),
+    )
     job = await store.create_job(session_id, payload.request_id)
     original_request = store.sessions[session_id].analysis_requests.setdefault(
         job.id, payload.model_dump()
     )
+    store.save_analysis_request(job.id, original_request)
     if job.status == JobStatus.queued:
         background.add_task(
-            orchestrator.run, job.id, session_id, original_request.copy()
+            orchestrator.run, job.id, session_id, original_request.copy(), overrides
         )
     return job
 
@@ -505,11 +636,23 @@ async def get_artifacts(session_id: str) -> ArtifactsResponse:
 
 
 @app.post("/v1/chat/stream", dependencies=[Depends(require_token)])
-async def chat(payload: ChatRequest) -> StreamingResponse:
+async def chat(payload: ChatRequest, request: Request) -> StreamingResponse:
+    text_kwargs: dict[str, str] = {}
+    api_key = getattr(request.state, "llm_text_api_key", "")
+    endpoint = getattr(request.state, "llm_text_endpoint", "")
+    model = getattr(request.state, "llm_text_model", "")
+    if api_key:
+        text_kwargs["api_key"] = api_key
+    if endpoint:
+        text_kwargs["base_url"] = endpoint
+    if model:
+        text_kwargs["model"] = model
+
     async def stream():
         text = await provider.chat(
             payload.question,
             {"result": payload.result, "evidence_ids": payload.evidence_ids},
+            **text_kwargs,
         )
         for token in text:
             yield f"data: {json.dumps({'delta': token}, ensure_ascii=False)}\n\n"
@@ -521,7 +664,7 @@ async def chat(payload: ChatRequest) -> StreamingResponse:
 
 @app.websocket("/v1/sessions/{session_id}/live")
 async def live_transcript(websocket: WebSocket, session_id: str, token: str):
-    if token != settings.memecho_demo_token or session_id not in store.sessions:
+    if (settings.memecho_demo_token and token != settings.memecho_demo_token) or session_id not in store.sessions:
         await websocket.close(code=4401)
         return
     await websocket.accept()

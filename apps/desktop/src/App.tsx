@@ -20,13 +20,18 @@ import { ProcessingDetailsPanel } from "./components/ProcessingDetailsPanel";
 import { ReportView } from "./components/ReportView";
 import { RelationsView } from "./components/RelationsView";
 import {
+  clearLlmConfig,
   gateway,
   GatewayApiError,
   getGatewayUrl,
+  getLlmConfigState,
   hasGatewayToken,
+  hasLlmConfig,
   initGatewayConfig,
+  initLlmConfig,
   setGatewayUrl,
   setGatewayToken,
+  setLlmConfig,
   type GatewayJob,
   type ParticipantCandidate,
   type ProcessingDetails,
@@ -155,6 +160,8 @@ function NowPage() {
   const audioContext = useRef<AudioContext | null>(null);
   const liveCapture = useRef<LivePcmCapture | null>(null);
   const browserCaptureStop = useRef<(() => Promise<void>) | null>(null);
+  const nativeLiveTimer = useRef<number | undefined>(undefined);
+  const nativeLiveActive = useRef(false);
   const webChunkIndex = useRef(0);
   const webRecordingId = useRef<string | null>(null);
   const recordingActive = useRef(false);
@@ -403,7 +410,7 @@ function NowPage() {
   function scheduleLiveReconnect() {
     if (
       !recordingActive.current ||
-      !liveCapture.current ||
+      (!liveCapture.current && !nativeLiveActive.current) ||
       !liveSessionId.current ||
       liveRetryTimer.current
     ) {
@@ -419,7 +426,7 @@ function NowPage() {
   }
 
   function connectLive(sessionId: string) {
-    if (!recordingActive.current || !liveCapture.current) return;
+    if (!recordingActive.current || (!liveCapture.current && !nativeLiveActive.current)) return;
     setLiveStatus(liveRetryAttempt.current > 0 ? "reconnecting" : "connecting");
     let allowReconnect = true;
     let ws: WebSocket;
@@ -494,11 +501,56 @@ function NowPage() {
     });
   }
 
+  function startNativeLiveAudio() {
+    nativeLiveActive.current = true;
+    // Poll native WASAPI PCM from the Tauri bridge and feed to the live WebSocket.
+    const poll = () => {
+      if (!recordingActive.current) return;
+      bridge
+        .pollLivePcm()
+        .then((base64) => {
+          if (!base64 || !recordingActive.current) return;
+          const ws = socket.current;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            try {
+              const binary = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+              if (binary.byteLength > 0) {
+                ws.send(binary.buffer);
+                // Simple RMS level estimate from PCM16 bytes
+                const view = new DataView(binary.buffer);
+                let sum = 0;
+                const count = binary.byteLength / 2;
+                for (let i = 0; i < count; i++) {
+                  const sample = view.getInt16(i * 2, true) / 32768;
+                  sum += sample * sample;
+                }
+                const level = count > 0 ? Math.min(1, Math.sqrt(sum / count)) : 0;
+                useAppStore.getState().patch({ volume: level });
+              }
+            } catch {
+              setLiveStatus("reconnecting");
+              socket.current?.close();
+            }
+          }
+        })
+        .catch(() => {
+          // Transient IPC error — skip this tick
+        });
+    };
+    // Poll at ~50ms intervals (matches WASAPI 50ms buffer + 10ms poll sleep)
+    nativeLiveTimer.current = window.setInterval(poll, 50);
+  }
+
   async function stopLiveAudio(flush = false) {
     const capture = liveCapture.current;
     liveCapture.current = null;
     const stopBrowserCapture = browserCaptureStop.current;
     browserCaptureStop.current = null;
+    if (nativeLiveTimer.current) {
+      window.clearInterval(nativeLiveTimer.current);
+      nativeLiveTimer.current = undefined;
+    }
+    nativeLiveActive.current = false;
     try {
       await capture?.stop(flush);
     } catch {
@@ -507,6 +559,10 @@ function NowPage() {
       stream.current?.getTracks().forEach((track) => track.stop());
       stream.current = null;
       await stopBrowserCapture?.();
+      // Stop native WASAPI live stream if active
+      if (isTauri) {
+        await bridge.stopLiveStream().catch(() => undefined);
+      }
       useAppStore.getState().patch({ volume: 0 });
     }
   }
@@ -557,14 +613,21 @@ function NowPage() {
           renderDeviceId || null,
         );
         localSessionId.current = capture.session_id;
+        // Start native WASAPI live stream for real-time captioning.
+        // "microphone" source uses system loopback (WASAPI loopback has the
+        // actual audio); "mixed" uses both mic + loopback averaged.
+        const liveSource = source === "mixed" ? "mixed" : "system";
         try {
-          const media = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: true, noiseSuppression: true },
-          });
-          stream.current = media;
-          startLiveAudio(media);
-        } catch {
-          setMeterNote("音量计不可用：未授予窗口麦克风访问权限（不影响本地录音）");
+          await bridge.startLiveStream(
+            liveSource,
+            micDeviceId || null,
+            renderDeviceId || null,
+          );
+          startNativeLiveAudio();
+        } catch (liveErr) {
+          setMeterNote(
+            `实时字幕流不可用：${describeError(liveErr, "原生音频流启动失败")}（不影响本地录音）`,
+          );
         }
       } else {
         backend.current = "web";
@@ -592,7 +655,7 @@ function NowPage() {
         startLiveAudio(browserCapture.media);
       }
       recordingActive.current = true;
-      if (liveCapture.current) {
+      if (liveCapture.current || nativeLiveActive.current) {
         connectLive(session.id);
       } else {
         setLiveStatus("offline");
@@ -795,7 +858,7 @@ function NowPage() {
             .catch(() => undefined);
         }
         // Immediately reflect upload success in the processing details panel.
-        state.patch({ jobStatus: "uploaded", progress: 12, stageLabel: "浏览器录音上传完成，正在提交分析" });
+        state.patch({ jobStatus: "uploading", progress: 12, stageLabel: "浏览器录音上传完成，正在提交分析" });
         try {
           const details = await gateway.processingDetails(context.gatewaySessionId);
           setProcessingDetails(details);
@@ -1138,7 +1201,7 @@ function NowPage() {
         )}
         {isTauri && source === "mixed" && (
           <p className="live-scope-note">
-            {"\u5b9e\u65f6\u5b57\u5e55\u4ec5\u4f7f\u7528\u9ea6\u514b\u98ce\uff1b\u6b63\u5f0f\u62a5\u544a\u4ecd\u4f7f\u7528\u672c\u5730\u9ea6\u514b\u98ce\u4e0e\u7cfb\u7edf\u58f0\u97f3\u53cc\u8f68\u3002"}
+            实时字幕使用麦克风＋系统声音混合音源（WASAPI）；正式报告仍使用本地双轨录音。
           </p>
         )}
         {!isTauri && source === "mixed" && (
@@ -1713,13 +1776,47 @@ function SettingsPage() {
   const [tokenError, setTokenError] = useState("");
   const isTauri = isTauriRuntime();
 
+  // LLM config state
+  const [textEndpoint, setTextEndpoint] = useState("");
+  const [textModel, setTextModel] = useState("");
+  const [textApiKeySaved, setTextApiKeySaved] = useState(false);
+  const [textDraftEndpoint, setTextDraftEndpoint] = useState("");
+  const [textDraftModel, setTextDraftModel] = useState("");
+  const [textDraftApiKey, setTextDraftApiKey] = useState("");
+  const [textLlmStatus, setTextLlmStatus] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+  const [textLlmError, setTextLlmError] = useState("");
+
+  const [audioEndpoint, setAudioEndpoint] = useState("");
+  const [audioApiKeySaved, setAudioApiKeySaved] = useState(false);
+  const [audioDraftEndpoint, setAudioDraftEndpoint] = useState("");
+  const [audioDraftApiKey, setAudioDraftApiKey] = useState("");
+  const [audioWorkspaceId, setAudioWorkspaceId] = useState("");
+  const [audioDraftWorkspaceId, setAudioDraftWorkspaceId] = useState("");
+  const [audioAsrStatus, setAudioAsrStatus] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+  const [audioAsrError, setAudioAsrError] = useState("");
+
   useEffect(() => {
     initGatewayConfig().then((url) => {
       setGwUrl(url);
       setGwDraft(url);
       setTokenSaved(hasGatewayToken());
     });
-  }, []);
+    if (isTauri) {
+      initLlmConfig().then(() => {
+        const s = getLlmConfigState();
+        setTextEndpoint(s.textEndpoint);
+        setTextDraftEndpoint(s.textEndpoint);
+        setTextModel(s.textModel);
+        setTextDraftModel(s.textModel);
+        setTextApiKeySaved(s.hasTextApiKey);
+        setAudioEndpoint(s.audioEndpoint);
+        setAudioDraftEndpoint(s.audioEndpoint);
+        setAudioApiKeySaved(s.hasAudioApiKey);
+        setAudioWorkspaceId(s.workspaceId);
+        setAudioDraftWorkspaceId(s.workspaceId);
+      });
+    }
+  }, [isTauri]);
 
   const saveToken = useCallback(async () => {
     setTokenError("");
@@ -1852,6 +1949,82 @@ function SettingsPage() {
               {tokenError && <p className="error-banner">{tokenError}</p>}
             </div>
           )}
+        </article>
+        <article>
+          <h2>文本分析模型</h2>
+          <p>
+            当前 Endpoint: <code>{textEndpoint || "使用网关默认"}</code>
+            {textModel && <> · 模型: <code>{textModel}</code></>}
+          </p>
+          <div className="gateway-config-row">
+            <input type="text" value={textDraftEndpoint} onChange={(e) => { setTextDraftEndpoint(e.target.value); setTextLlmStatus("idle"); }} placeholder="https://api.openai.com/v1" className="gateway-url-input" />
+          </div>
+          <div className="gateway-config-row" style={{ marginTop: 4 }}>
+            <input type="text" value={textDraftModel} onChange={(e) => { setTextDraftModel(e.target.value); setTextLlmStatus("idle"); }} placeholder="模型名称，如 gpt-4o" className="gateway-url-input" />
+          </div>
+          <div className="gateway-config-row" style={{ marginTop: 4 }}>
+            <input type="password" value={textDraftApiKey} onChange={(e) => { setTextDraftApiKey(e.target.value); setTextLlmStatus("idle"); }} placeholder={textApiKeySaved ? "已安全保存；输入新值可替换" : "API Key"} autoComplete="off" className="gateway-url-input" />
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button type="button" disabled={textLlmStatus === "testing"} onClick={async () => {
+              setTextLlmStatus("testing"); setTextLlmError("");
+              try {
+                if (textDraftEndpoint || textDraftModel || textDraftApiKey) {
+                  await setLlmConfig({ textEndpoint: textDraftEndpoint, textModel: textDraftModel, textApiKey: textDraftApiKey || undefined });
+                }
+                const r = await gateway.testLlmConnection("text");
+                setTextLlmStatus(r.ok ? "ok" : "fail");
+                if (!r.ok) setTextLlmError(r.error ?? "连接失败");
+                if (r.ok) { setTextEndpoint(textDraftEndpoint); setTextModel(textDraftModel); setTextApiKeySaved(!!textDraftApiKey || textApiKeySaved); }
+              } catch (e) { setTextLlmStatus("fail"); setTextLlmError(e instanceof Error ? e.message : "操作失败"); }
+            }}>{textLlmStatus === "testing" ? "测试中…" : "测试并保存"}</button>
+            <button type="button" onClick={async () => {
+              await setLlmConfig({ textEndpoint: textDraftEndpoint, textModel: textDraftModel, ...(textDraftApiKey ? { textApiKey: textDraftApiKey } : {}) });
+              setTextEndpoint(textDraftEndpoint); setTextModel(textDraftModel); if (textDraftApiKey) setTextApiKeySaved(true); setTextDraftApiKey(""); setTextLlmStatus("ok");
+            }}>仅保存</button>
+            <button type="button" onClick={async () => {
+              await clearLlmConfig(); setTextEndpoint(""); setTextModel(""); setTextApiKeySaved(false); setTextDraftEndpoint(""); setTextDraftModel(""); setTextDraftApiKey(""); setAudioEndpoint(""); setAudioApiKeySaved(false); setAudioDraftEndpoint(""); setAudioDraftApiKey(""); setAudioWorkspaceId(""); setAudioDraftWorkspaceId(""); setTextLlmStatus("idle");
+            }}>清除全部</button>
+          </div>
+          {textLlmStatus === "ok" && <p className="gateway-ok">✓ 配置已保存</p>}
+          {textLlmStatus === "fail" && <p className="error-banner">✗ {textLlmError}</p>}
+          <p className="gateway-hint">支持 OpenAI 兼容接口（/chat/completions）。API Key 安全存储在 Windows Credential Manager。</p>
+        </article>
+        <article>
+          <h2>语音转写模型</h2>
+          <p>
+            当前 Endpoint: <code>{audioEndpoint || "使用网关默认"}</code>
+          </p>
+          <div className="gateway-config-row">
+            <input type="text" value={audioDraftEndpoint} onChange={(e) => { setAudioDraftEndpoint(e.target.value); setAudioAsrStatus("idle"); }} placeholder="https://dashscope.aliyuncs.com" className="gateway-url-input" />
+          </div>
+          <div className="gateway-config-row" style={{ marginTop: 4 }}>
+            <input type="password" value={audioDraftApiKey} onChange={(e) => { setAudioDraftApiKey(e.target.value); setAudioAsrStatus("idle"); }} placeholder={audioApiKeySaved ? "已安全保存；输入新值可替换" : "API Key"} autoComplete="off" className="gateway-url-input" />
+          </div>
+          <div className="gateway-config-row" style={{ marginTop: 4 }}>
+            <input type="text" value={audioDraftWorkspaceId} onChange={(e) => { setAudioDraftWorkspaceId(e.target.value); setAudioAsrStatus("idle"); }} placeholder="Workspace ID（可选）" className="gateway-url-input" />
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button type="button" disabled={audioAsrStatus === "testing"} onClick={async () => {
+              setAudioAsrStatus("testing"); setAudioAsrError("");
+              try {
+                if (audioDraftEndpoint || audioDraftApiKey) {
+                  await setLlmConfig({ audioEndpoint: audioDraftEndpoint, audioApiKey: audioDraftApiKey || undefined, workspaceId: audioDraftWorkspaceId });
+                }
+                const r = await gateway.testLlmConnection("audio");
+                setAudioAsrStatus(r.ok ? "ok" : "fail");
+                if (!r.ok) setAudioAsrError(r.error ?? "连接失败");
+                if (r.ok) { setAudioEndpoint(audioDraftEndpoint); setAudioApiKeySaved(!!audioDraftApiKey || audioApiKeySaved); }
+              } catch (e) { setAudioAsrStatus("fail"); setAudioAsrError(e instanceof Error ? e.message : "操作失败"); }
+            }}>{audioAsrStatus === "testing" ? "测试中…" : "测试并保存"}</button>
+            <button type="button" onClick={async () => {
+              await setLlmConfig({ audioEndpoint: audioDraftEndpoint, ...(audioDraftApiKey ? { audioApiKey: audioDraftApiKey } : {}), workspaceId: audioDraftWorkspaceId });
+              setAudioEndpoint(audioDraftEndpoint); if (audioDraftApiKey) setAudioApiKeySaved(true); setAudioDraftApiKey(""); setAudioWorkspaceId(audioDraftWorkspaceId); setAudioAsrStatus("ok");
+            }}>仅保存</button>
+          </div>
+          {audioAsrStatus === "ok" && <p className="gateway-ok">✓ 配置已保存</p>}
+          {audioAsrStatus === "fail" && <p className="error-banner">✗ {audioAsrError}</p>}
+          <p className="gateway-hint">支持 DashScope 兼容接口。API Key 安全存储在 Windows Credential Manager。</p>
         </article>
         <article>
           <h2>数据位置</h2>

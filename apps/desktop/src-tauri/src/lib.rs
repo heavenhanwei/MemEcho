@@ -5,6 +5,7 @@ pub mod db;
 pub mod evidence;
 pub mod gateway_check;
 pub mod importer;
+pub mod llm_config;
 mod paths;
 mod recovery;
 pub mod report;
@@ -12,6 +13,7 @@ mod state;
 pub mod upload;
 
 use audio::AudioCapture;
+use audio::LiveStreamState;
 use parking_lot::Mutex;
 use state::CaptureState;
 use std::sync::Arc;
@@ -19,6 +21,7 @@ use std::sync::Arc;
 pub struct AppState {
     pub capture: Arc<Mutex<CaptureState>>,
     pub audio: Arc<Mutex<AudioCapture>>,
+    pub live: Arc<LiveStreamState>,
     pub sessions_dir: std::path::PathBuf,
     pub db: db::Repository,
 }
@@ -33,6 +36,7 @@ pub fn run() {
         .manage(AppState {
             capture: Arc::new(Mutex::new(CaptureState::new())),
             audio: Arc::new(Mutex::new(AudioCapture::new())),
+            live: Arc::new(LiveStreamState::new()),
             sessions_dir,
             db,
         })
@@ -63,6 +67,11 @@ pub fn run() {
             commands::check_gateway,
             commands::set_gateway_url,
             commands::get_gateway_url,
+            commands::get_llm_config,
+            commands::set_llm_config_file,
+            commands::start_live_stream,
+            commands::poll_live_pcm,
+            commands::stop_live_stream,
         ])
         .run(tauri::generate_context!())
         .expect("error while running memEcho");

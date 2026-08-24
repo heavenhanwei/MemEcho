@@ -5,7 +5,7 @@ import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { gateway, type GatewayJob } from "./lib/api";
+import { gateway, type GatewayJob, type ProcessingDetails } from "./lib/api";
 import { bridge } from "./lib/tauri";
 import { useAppStore } from "./store";
 
@@ -478,7 +478,7 @@ describe("web workflow degradation", () => {
       configurable: true,
       value: { getUserMedia: vi.fn().mockResolvedValue(new FakeMediaStream()) },
     });
-    const detailsWithTrack = {
+    const detailsWithTrack: ProcessingDetails = {
       session_id: "sess-1",
       updated_at: "2026-01-01T00:00:00Z",
       tracks: [

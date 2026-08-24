@@ -1164,7 +1164,8 @@ mod integration_tests {
         .unwrap();
 
         // Mirror delete_local_session: cascade DB records, then remove files.
-        db.cascade_delete_session(&session_id, &sessions_dir).unwrap();
+        db.cascade_delete_session(&session_id, &sessions_dir)
+            .unwrap();
         let session_dir = sessions_dir.join(&session_id);
         std::fs::remove_dir_all(&session_dir).unwrap();
 

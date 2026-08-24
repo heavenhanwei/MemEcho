@@ -1,0 +1,273 @@
+{
+  "schema_version": "1.1",
+  "request_id": "demo-single-001",
+  "analysis_mode": "connected_full",
+  "scope": {
+    "single_session": true,
+    "signals_used": ["transcript", "linguistic", "acoustic", "pitch", "energy"],
+    "signals_missing": [],
+    "quality": 0.88,
+    "target_participant_ids": ["speaker_self"],
+    "self_participant_id": "speaker_self",
+    "self_identity_basis": "auto_single_speaker"
+  },
+  "minutes": {
+    "summary": "个人工作复盘独白，围绕近期项目推进中的瓶颈、情绪变化和下一步行动计划展开。叙述者在回顾中展现出从焦虑到接纳的情绪转变，最终明确了三个可执行的行动项。",
+    "focus": ["项目瓶颈识别", "情绪自我觉察", "行动规划"],
+    "consensus": [],
+    "disagreements": [],
+    "explicit_actions": [
+      {
+        "text": "明天上午先和设计师确认接口方案",
+        "owner": "speaker_self",
+        "due_at": null,
+        "origin": "discussed",
+        "status": "confirmed",
+        "evidence_refs": ["ev_04"]
+      },
+      {
+        "text": "把本周的进度整理成文档发给团队",
+        "owner": "speaker_self",
+        "due_at": null,
+        "origin": "discussed",
+        "status": "confirmed",
+        "evidence_refs": ["ev_05"]
+      },
+      {
+        "text": "给自己留半天时间处理积压的技术债",
+        "owner": "speaker_self",
+        "due_at": null,
+        "origin": "suggested",
+        "status": "proposed",
+        "evidence_refs": ["ev_06"]
+      }
+    ],
+    "recommendations": [
+      {
+        "text": "定期进行类似的自我复盘，将情绪觉察转化为可执行的调整",
+        "owner": null,
+        "due_at": null,
+        "origin": "suggested",
+        "status": "proposed",
+        "evidence_refs": ["ev_03"]
+      }
+    ]
+  },
+  "content_analysis": [
+    {
+      "participant_id": "speaker_self",
+      "fact_claims": [
+        "接口方案已经拖了两周没有定下来",
+        "本周完成了三个核心模块的重构"
+      ],
+      "opinions": [
+        "瓶颈不在技术而在沟通对齐",
+        "适当放慢节奏反而能提高整体效率"
+      ],
+      "attitudes": [
+        "从最初的焦虑逐渐转向务实的接纳",
+        "对自我节奏的重新认识"
+      ],
+      "influence_summary": []
+    }
+  ],
+  "participants": [
+    {"id": "speaker_self", "name": "我", "is_self": true}
+  ],
+  "vad_series": [
+    {
+      "participant_id": "speaker_self",
+      "segment_id": "seg_01",
+      "v": -0.20,
+      "a": 0.45,
+      "d": 0.15,
+      "scale": "-1..1",
+      "confidence": 0.80,
+      "linguistic_weight": 0.7,
+      "acoustic_weight": 0.3,
+      "evidence_refs": ["ev_01"]
+    },
+    {
+      "participant_id": "speaker_self",
+      "segment_id": "seg_02",
+      "v": -0.35,
+      "a": 0.58,
+      "d": 0.22,
+      "scale": "-1..1",
+      "confidence": 0.82,
+      "linguistic_weight": 0.7,
+      "acoustic_weight": 0.3,
+      "evidence_refs": ["ev_02"]
+    },
+    {
+      "participant_id": "speaker_self",
+      "segment_id": "seg_03",
+      "v": 0.05,
+      "a": 0.38,
+      "d": 0.30,
+      "scale": "-1..1",
+      "confidence": 0.78,
+      "linguistic_weight": 0.7,
+      "acoustic_weight": 0.3,
+      "evidence_refs": ["ev_03"]
+    },
+    {
+      "participant_id": "speaker_self",
+      "segment_id": "seg_04",
+      "v": 0.18,
+      "a": 0.42,
+      "d": 0.45,
+      "scale": "-1..1",
+      "confidence": 0.83,
+      "linguistic_weight": 0.7,
+      "acoustic_weight": 0.3,
+      "evidence_refs": ["ev_04"]
+    },
+    {
+      "participant_id": "speaker_self",
+      "segment_id": "seg_05",
+      "v": 0.28,
+      "a": 0.35,
+      "d": 0.50,
+      "scale": "-1..1",
+      "confidence": 0.85,
+      "linguistic_weight": 0.7,
+      "acoustic_weight": 0.3,
+      "evidence_refs": ["ev_05"]
+    },
+    {
+      "participant_id": "speaker_self",
+      "segment_id": "seg_06",
+      "v": 0.32,
+      "a": 0.30,
+      "d": 0.48,
+      "scale": "-1..1",
+      "confidence": 0.81,
+      "linguistic_weight": 0.7,
+      "acoustic_weight": 0.3,
+      "evidence_refs": ["ev_06"]
+    }
+  ],
+  "interaction_events": [],
+  "self_echo": {
+    "participant_id": "speaker_self",
+    "identity_basis": "auto_single_speaker",
+    "effects": [
+      {
+        "wording": "瓶颈不在技术，在我跟设计师那边一直没对齐。",
+        "observed_followup": "叙述者语速放缓，随后转入具体行动规划。",
+        "confidence": 0.76,
+        "evidence_refs": ["ev_03"]
+      }
+    ],
+    "alternatives": [
+      {
+        "source": "都是沟通的问题。",
+        "rewrite": "我注意到技术之外的对齐也在影响进度，想先把这部分理清楚。"
+      }
+    ]
+  },
+  "coaching": {
+    "enabled": false,
+    "status": "not_requested",
+    "scenes": []
+  },
+  "insights": [
+    {
+      "id": "in_01",
+      "claim": "叙述者在独白中经历了从负效价（焦虑）到正效价（接纳）的自然转变，转折点出现在'瓶颈不在技术'这一自我觉察之后。",
+      "claim_level": "interpreted",
+      "confidence": 0.80,
+      "evidence_refs": ["ev_01", "ev_02", "ev_03"],
+      "alternatives": ["效价变化也可能与叙述者自然调整呼吸节奏有关"]
+    },
+    {
+      "id": "in_02",
+      "claim": "语速在描述瓶颈时明显放缓（每秒约 2.8 字），在规划行动时恢复到正常节奏（每秒约 3.5 字）。",
+      "claim_level": "computed",
+      "confidence": 0.88,
+      "evidence_refs": ["ev_02", "ev_04"],
+      "alternatives": ["语速差异可能与内容复杂度有关"]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ev_01",
+      "source_type": "transcript",
+      "speaker_id": "speaker_self",
+      "start_ms": 0,
+      "end_ms": 28000,
+      "segment_id": "seg_01",
+      "excerpt": "这周过得挺快的，但回头一看好像没推进多少。有些事情一直在拖，不是不想做，是总被别的事情打断。",
+      "quality_flags": []
+    },
+    {
+      "id": "ev_02",
+      "source_type": "acoustic",
+      "speaker_id": "speaker_self",
+      "start_ms": 28000,
+      "end_ms": 55000,
+      "segment_id": "seg_02",
+      "excerpt": "接口方案已经拖了两周了。每次想坐下来整理，又冒出新的问题。说实话有点焦虑，感觉自己在原地打转。",
+      "quality_flags": []
+    },
+    {
+      "id": "ev_03",
+      "source_type": "transcript",
+      "speaker_id": "speaker_self",
+      "start_ms": 55000,
+      "end_ms": 82000,
+      "segment_id": "seg_03",
+      "excerpt": "但仔细想想，瓶颈不在技术，在我跟设计师那边一直没对齐。我应该早点把问题摆出来，而不是自己闷头想。",
+      "quality_flags": []
+    },
+    {
+      "id": "ev_04",
+      "source_type": "transcript",
+      "speaker_id": "speaker_self",
+      "start_ms": 82000,
+      "end_ms": 110000,
+      "segment_id": "seg_04",
+      "excerpt": "好，明天上午先做这件事。先把设计师约了，把接口方案定下来。这个不定，后面全是空转。",
+      "quality_flags": []
+    },
+    {
+      "id": "ev_05",
+      "source_type": "acoustic",
+      "speaker_id": "speaker_self",
+      "start_ms": 110000,
+      "end_ms": 140000,
+      "segment_id": "seg_05",
+      "excerpt": "另外这周其实做了不少事，三个核心模块都重构完了。只是没有整理出来，团队可能不知道进展。今天下班前把进度文档写一下。",
+      "quality_flags": []
+    },
+    {
+      "id": "ev_06",
+      "source_type": "transcript",
+      "speaker_id": "speaker_self",
+      "start_ms": 140000,
+      "end_ms": 170000,
+      "segment_id": "seg_06",
+      "excerpt": "还有技术债的事。一直说要处理，一直没排上。这周给自己留半天，专门处理那几个积压的问题。节奏放慢一点没关系，别让基础越来越脆。",
+      "quality_flags": []
+    }
+  ],
+  "uncertainties": [
+    "单人独白无对话交互，自我回声效果仅基于语言模式推断",
+    "情绪分析基于语音声学特征，不等同于心理状态诊断",
+    "auto_single_speaker 模式下身份确认未经用户显式确认"
+  ],
+  "provenance": {
+    "skill_version": "1.0.2",
+    "service_version": "0.1.0",
+    "model_manifest": [
+      {"provider": "bailian", "model": "fun-asr"},
+      {"provider": "bailian", "model": "qwen-filetrans"},
+      {"provider": "bailian", "model": "qwen3.7"}
+    ]
+  },
+  "memory": {
+    "written": false,
+    "consent_basis": null
+  }
+}

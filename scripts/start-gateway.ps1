@@ -79,4 +79,40 @@ Write-Host "Press Ctrl+C to stop."
 Write-Host ""
 
 Set-Location $GatewayDir
-& $pythonPath -m uvicorn memecho_gateway.main:app --host 127.0.0.1 --port $Port
+$gatewayJob = Start-Job -ScriptBlock {
+    param($py, $dir, $p)
+    Set-Location $dir
+    & $py -m uvicorn memecho_gateway.main:app --host 127.0.0.1 --port $p
+} -ArgumentList $pythonPath, $GatewayDir, $Port
+
+# Health check: wait for gateway to become ready
+$healthUrl = "http://127.0.0.1:$Port/v1/health"
+$ready = $false
+for ($i = 0; $i -lt 15; $i++) {
+    Start-Sleep -Seconds 1
+    try {
+        $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2 -ErrorAction Stop
+        $ready = $true
+        Write-Host ""
+        Write-Host "Gateway is healthy." -ForegroundColor Green
+        Write-Host "  Provider: $($health.provider)"
+        if ($health.version) { Write-Host "  Version:  $($health.version)" }
+        Write-Host ""
+        break
+    } catch { }
+}
+if (-not $ready) {
+    Write-Host ""
+    Write-Host "Gateway did not become healthy within 15 seconds. It may still be starting." -ForegroundColor Yellow
+    Write-Host "Check the gateway window for errors." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+# Wait for the gateway process; print exit message when it stops
+try {
+    Receive-Job $gatewayJob -Wait
+} finally {
+    Remove-Job $gatewayJob -Force -ErrorAction SilentlyContinue
+    Write-Host ""
+    Write-Host "Gateway has stopped." -ForegroundColor Cyan
+}

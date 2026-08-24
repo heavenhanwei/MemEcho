@@ -1,8 +1,12 @@
 import type {
   AnalysisResult,
+  FileTransPhase,
   JobStatus,
   Participant,
+  ProcessingDetails,
+  ProcessingStage,
   RealtimeEvent,
+  TrackProcessingDetails,
 } from "@memecho/contracts";
 import { isTauriRuntime } from "./tauri";
 
@@ -84,13 +88,140 @@ export function hasGatewayToken(): boolean {
   return _token.length > 0;
 }
 
+// ── LLM config (user-supplied API keys and endpoints) ──────────────────────
+
+const TEXT_LLM_KEY_CREDENTIAL = "text_llm_api_key";
+const AUDIO_ASR_KEY_CREDENTIAL = "audio_asr_api_key";
+
+let _llmTextEndpoint = "";
+let _llmTextModel = "";
+let _llmAudioEndpoint = "";
+let _llmWorkspaceId = "";
+let _cachedTextApiKey = "";
+let _cachedAudioApiKey = "";
+let _llmInitialized = false;
+
+/** Load LLM config from Tauri bridge (JSON file + credential manager). */
+export async function initLlmConfig(): Promise<void> {
+  if (_llmInitialized) return;
+  if (isTauriRuntime()) {
+    const { bridge } = await import("./tauri");
+    try {
+      const config = await bridge.getLlmConfig();
+      _llmTextEndpoint = config.text_endpoint ?? "";
+      _llmTextModel = config.text_model ?? "";
+      _llmAudioEndpoint = config.audio_endpoint ?? "";
+      _llmWorkspaceId = config.workspace_id ?? "";
+    } catch {
+      // first run or bridge unavailable
+    }
+    try {
+      _cachedTextApiKey = (await bridge.credentialGet(TEXT_LLM_KEY_CREDENTIAL)) ?? "";
+    } catch {
+      /* not set */
+    }
+    try {
+      _cachedAudioApiKey = (await bridge.credentialGet(AUDIO_ASR_KEY_CREDENTIAL)) ?? "";
+    } catch {
+      /* not set */
+    }
+  }
+  _llmInitialized = true;
+}
+
+/** Save LLM config. API keys go to credential manager, rest to JSON file. */
+export async function setLlmConfig(config: {
+  textEndpoint?: string;
+  textModel?: string;
+  textApiKey?: string;
+  audioEndpoint?: string;
+  audioApiKey?: string;
+  workspaceId?: string;
+}): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const { bridge } = await import("./tauri");
+  // Save non-secret fields to JSON
+  await bridge.setLlmConfigFile({
+    text_endpoint: config.textEndpoint ?? _llmTextEndpoint,
+    text_model: config.textModel ?? _llmTextModel,
+    audio_endpoint: config.audioEndpoint ?? _llmAudioEndpoint,
+    workspace_id: config.workspaceId ?? _llmWorkspaceId,
+  });
+  // Save secrets to credential manager + update cache
+  if (config.textApiKey !== undefined) {
+    await bridge.credentialSet(TEXT_LLM_KEY_CREDENTIAL, config.textApiKey);
+    _cachedTextApiKey = config.textApiKey;
+  }
+  if (config.audioApiKey !== undefined) {
+    await bridge.credentialSet(AUDIO_ASR_KEY_CREDENTIAL, config.audioApiKey);
+    _cachedAudioApiKey = config.audioApiKey;
+  }
+  // Update in-memory state
+  if (config.textEndpoint !== undefined) _llmTextEndpoint = config.textEndpoint;
+  if (config.textModel !== undefined) _llmTextModel = config.textModel;
+  if (config.audioEndpoint !== undefined) _llmAudioEndpoint = config.audioEndpoint;
+  if (config.workspaceId !== undefined) _llmWorkspaceId = config.workspaceId;
+}
+
+/** Clear all LLM config (secrets + non-secrets). */
+export async function clearLlmConfig(): Promise<void> {
+  if (isTauriRuntime()) {
+    const { bridge } = await import("./tauri");
+    await bridge.setLlmConfigFile({
+      text_endpoint: "",
+      text_model: "",
+      audio_endpoint: "",
+      workspace_id: "",
+    });
+    try { await bridge.credentialDelete(TEXT_LLM_KEY_CREDENTIAL); } catch { /* */ }
+    try { await bridge.credentialDelete(AUDIO_ASR_KEY_CREDENTIAL); } catch { /* */ }
+  }
+  _llmTextEndpoint = "";
+  _llmTextModel = "";
+  _llmAudioEndpoint = "";
+  _llmWorkspaceId = "";
+  _cachedTextApiKey = "";
+  _cachedAudioApiKey = "";
+}
+
+/** Build X-LLM-* headers for gateway requests. */
+function llmHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (_llmTextEndpoint) headers["X-LLM-Text-Endpoint"] = _llmTextEndpoint;
+  if (_llmTextModel) headers["X-LLM-Text-Model"] = _llmTextModel;
+  if (_llmAudioEndpoint) headers["X-LLM-Audio-Endpoint"] = _llmAudioEndpoint;
+  if (_llmWorkspaceId) headers["X-LLM-Workspace-Id"] = _llmWorkspaceId;
+  if (_cachedTextApiKey) headers["X-LLM-Text-Api-Key"] = _cachedTextApiKey;
+  if (_cachedAudioApiKey) headers["X-LLM-Audio-Api-Key"] = _cachedAudioApiKey;
+  return headers;
+}
+
+/** Whether user has configured any LLM settings. */
+export function hasLlmConfig(): boolean {
+  return !!(_llmTextEndpoint || _llmAudioEndpoint || _cachedTextApiKey || _cachedAudioApiKey);
+}
+
+/** Current LLM config state (for settings page display). */
+export function getLlmConfigState() {
+  return {
+    textEndpoint: _llmTextEndpoint,
+    textModel: _llmTextModel,
+    audioEndpoint: _llmAudioEndpoint,
+    workspaceId: _llmWorkspaceId,
+    hasTextApiKey: !!_cachedTextApiKey,
+    hasAudioApiKey: !!_cachedAudioApiKey,
+  };
+}
+
 function id(value: string): string {
   return encodeURIComponent(value);
 }
 
 function safeErrorDetail(value: unknown): string {
   if (typeof value !== "string") return "";
-  const redacted = _token ? value.replaceAll(_token, "[REDACTED]") : value;
+  let redacted = _token ? value.replaceAll(_token, "[REDACTED]") : value;
+  if (_cachedTextApiKey) redacted = redacted.replaceAll(_cachedTextApiKey, "[REDACTED]");
+  if (_cachedAudioApiKey) redacted = redacted.replaceAll(_cachedAudioApiKey, "[REDACTED]");
   return redacted
     .replace(/Bearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
@@ -140,6 +271,7 @@ export class GatewayApiError extends Error {
 
 async function fetchGateway(path: string, init: RequestInit = {}): Promise<Response> {
   await initGatewayConfig();
+  await initLlmConfig();
   const url = _url;
   try {
     const response = await fetch(`${url}${path}`, {
@@ -147,6 +279,7 @@ async function fetchGateway(path: string, init: RequestInit = {}): Promise<Respo
       headers: {
         "Content-Type": "application/json",
         ...(_token ? { Authorization: `Bearer ${_token}` } : {}),
+        ...llmHeaders(),
         ...init.headers,
       },
     });
@@ -238,74 +371,17 @@ export interface SessionArtifacts {
   contents: { json: string; markdown: string; html: string };
 }
 
-export type ProcessingStage =
-  | "queued"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "skipped";
-
-export type FileTransPhase =
-  | "not_started"
-  | "submitting"
-  | "queued"
-  | "polling"
-  | "downloading"
-  | "normalizing"
-  | "succeeded"
-  | "failed"
-  | "timed_out";
-
-export interface ProcessingModuleDetails {
-  status: ProcessingStage;
-  error_code?: string | null;
-  elapsed_ms?: number | null;
-}
-
-export interface FileTransProcessingDetails extends ProcessingModuleDetails {
-  phase: FileTransPhase;
-  poll_attempts: number;
-  next_poll_after_ms?: number | null;
-  last_polled_at?: string | null;
-  retryable: boolean;
-  task_reference?: string | null;
-  sentence_count?: number | null;
-  language?: string | null;
-  audio_duration_ms?: number | null;
-}
-
-export interface TranscriptSnippet {
-  speaker_id: string;
-  start_ms: number;
-  end_ms: number;
-  text: string;
-}
-
-export interface TrackProcessingDetails {
-  upload_id: string;
-  file_name: string;
-  track: string;
-  mime_type: string;
-  size_bytes: number;
-  upload_status: ProcessingStage;
-  received_chunks: number;
-  expected_chunks: number;
-  oss_status: ProcessingStage;
-  modules: Record<string, ProcessingModuleDetails>;
-  filetrans: FileTransProcessingDetails;
-}
-
-export interface ProcessingDetails {
-  session_id: string;
-  updated_at: string;
-  tracks: TrackProcessingDetails[];
-  aligned_segment_count: number;
-  submitted_to_qwen: boolean;
-  qwen_status: ProcessingStage;
-  qwen_error_code?: string | null;
-  transcript_segments: TranscriptSnippet[];
-  transcript_truncated: boolean;
-}
+// Re-export ProcessingDetails types from generated contracts.
+// These were previously hand-written here; now auto-generated from OpenAPI.
+export type {
+  ProcessingStage,
+  FileTransPhase,
+  ModuleDetails as ProcessingModuleDetails,
+  FileTransDetails as FileTransProcessingDetails,
+  TranscriptSnippet,
+  TrackProcessingDetails,
+  ProcessingDetailsResponse as ProcessingDetails,
+} from "@memecho/contracts";
 
 function parseSseBlock<T>(block: string): T | undefined {
   const data = block
@@ -476,6 +552,14 @@ export const gateway = {
         if (event.delta) onDelta(event.delta);
       }
     }
+  },
+  testLlmConnection: async (
+    kind: "text" | "audio",
+  ): Promise<{ ok: boolean; error?: string }> => {
+    return request<{ ok: boolean; error?: string }>("/v1/llm/test", {
+      method: "POST",
+      body: JSON.stringify({ kind }),
+    });
   },
   liveUrl: (sessionId: string) => {
     const base = _url;

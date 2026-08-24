@@ -33,7 +33,12 @@ def reachable_schemas(openapi: dict[str, Any]) -> dict[str, dict[str, Any]]:
     schemas = openapi["components"]["schemas"]
     analyze = openapi["paths"]["/v1/sessions/{session_id}/analyze"]["post"]
     result = openapi["paths"]["/v1/sessions/{session_id}/result"]["get"]
-    roots = referenced_names(analyze["requestBody"]) | referenced_names(result["responses"]["200"])
+    details = openapi["paths"]["/v1/sessions/{session_id}/processing-details"]["get"]
+    roots = (
+        referenced_names(analyze["requestBody"])
+        | referenced_names(result["responses"]["200"])
+        | referenced_names(details["responses"]["200"])
+    )
     pending = list(roots)
     reachable: set[str] = set()
     while pending:

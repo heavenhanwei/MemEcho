@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,40 @@ def _contract_error(errors: list[str]) -> AnalysisContractError:
     if len(errors) > 12:
         detail += f"; and {len(errors) - 12} more validation errors"
     return AnalysisContractError(detail[:2000])
+
+
+@dataclass
+class ProviderOverrides:
+    text_api_key: str = ""
+    text_endpoint: str = ""
+    text_model: str = ""
+    audio_api_key: str = ""
+    audio_endpoint: str = ""
+    workspace_id: str = ""
+
+    @property
+    def text_kwargs(self) -> dict[str, str]:
+        """Non-empty text LLM overrides suitable for **kwargs unpacking."""
+        kw: dict[str, str] = {}
+        if self.text_api_key:
+            kw["api_key"] = self.text_api_key
+        if self.text_endpoint:
+            kw["base_url"] = self.text_endpoint
+        if self.text_model:
+            kw["model"] = self.text_model
+        return kw
+
+    @property
+    def audio_kwargs(self) -> dict[str, str]:
+        """Non-empty audio ASR overrides suitable for **kwargs unpacking."""
+        kw: dict[str, str] = {}
+        if self.audio_api_key:
+            kw["api_key"] = self.audio_api_key
+        if self.audio_endpoint:
+            kw["base_url"] = self.audio_endpoint
+        if self.workspace_id:
+            kw["workspace_id"] = self.workspace_id
+        return kw
 
 
 class Orchestrator:
@@ -133,11 +168,12 @@ class Orchestrator:
         audio_url: str,
         session: Any | None = None,
         upload_id: str | None = None,
+        audio_kwargs: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         calls: dict[str, Any] = {}
         if self.dashscope:
-            calls["fun_asr"] = self.dashscope.submit_fun_asr(audio_url)
-            calls["emotion"] = self.dashscope.submit_emotion(audio_url)
+            calls["fun_asr"] = self.dashscope.submit_fun_asr(audio_url, **(audio_kwargs or {}))
+            calls["emotion"] = self.dashscope.submit_emotion(audio_url, **(audio_kwargs or {}))
         if self.transcription:
             calls["transcription"] = self._download_transcription_with_phase(
                 audio_url, session, upload_id,
@@ -255,7 +291,8 @@ class Orchestrator:
         return collected
 
     async def _run_text_only(
-        self, job_id: str, session: Any, request: dict[str, Any]
+        self, job_id: str, session: Any, request: dict[str, Any],
+        overrides: ProviderOverrides | None = None,
     ) -> None:
         source = request.get("source") or {}
         text = source.get("text")
@@ -291,6 +328,8 @@ class Orchestrator:
             "model_errors": [],
             "evidence_weights": evidence_weights,
         }
+        if hasattr(self.store, 'save_job_intermediate'):
+            self.store.save_job_intermediate(job_id, session.job_intermediates[job_id])
         processing_details.set_alignment(session, 0)
 
         await self.store.update_job(
@@ -298,6 +337,7 @@ class Orchestrator:
         )
         session.resume_scheduled_jobs.discard(job_id)
         processing_details.set_qwen(session, ProcessingStage.running)
+        text_kwargs = overrides.text_kwargs if overrides else {}
         result = await self.provider.analyze(
             session={
                 "id": session.id,
@@ -309,6 +349,7 @@ class Orchestrator:
             },
             tracks=[],
             request=request,
+            **text_kwargs,
         )
         processing_details.set_qwen(session, ProcessingStage.succeeded)
         enforce_text_only_metadata(result)
@@ -324,17 +365,21 @@ class Orchestrator:
         result["rendered_markdown"] = render_markdown(result)
         result["rendered_html"] = render_html(result)
         session.result = result
+        if hasattr(self.store, 'save_session_result'):
+            self.store.save_session_result(session.id, result)
         await self.store.update_job(job_id, JobStatus.complete, 100, "Report complete")
 
-    async def run(self, job_id: str, session_id: str, request: dict[str, Any]) -> None:
+    async def run(self, job_id: str, session_id: str, request: dict[str, Any], overrides: ProviderOverrides | None = None) -> None:
         session = self.store.sessions[session_id]
         request = session.analysis_requests.get(job_id, request)
         oss_keys: list[str] = []
+        text_kwargs = overrides.text_kwargs if overrides else {}
+        audio_kw = overrides.audio_kwargs if overrides else {}
         try:
             job = self.store.jobs[job_id]
             is_resume = job.status == JobStatus.awaiting_identity
             if is_text_only_request(request):
-                await self._run_text_only(job_id, session, request)
+                await self._run_text_only(job_id, session, request, overrides)
                 return
 
             if not is_resume:
@@ -397,7 +442,8 @@ class Orchestrator:
                 observations = await asyncio.gather(
                     *(
                         self._collect_remote_observations(
-                            item[2], session=session, upload_id=item[0].id
+                            item[2], session=session, upload_id=item[0].id,
+                            audio_kwargs=audio_kw if audio_kw else None,
                         )
                         for item in remote_tracks
                     )
@@ -446,6 +492,8 @@ class Orchestrator:
                     "model_errors": model_errors,
                     "evidence_weights": evidence_weights,
                 }
+                if hasattr(self.store, 'save_job_intermediate'):
+                    self.store.save_job_intermediate(job_id, session.job_intermediates[job_id])
             else:
                 intermediate = session.job_intermediates.get(job_id)
                 if intermediate is None:
@@ -483,6 +531,7 @@ class Orchestrator:
                 },
                 tracks=track_labels,
                 request=request,
+                **text_kwargs,
             )
             processing_details.set_qwen(session, ProcessingStage.succeeded)
 
@@ -513,6 +562,8 @@ class Orchestrator:
             result["rendered_markdown"] = render_markdown(result)
             result["rendered_html"] = render_html(result)
             session.result = result
+            if hasattr(self.store, 'save_session_result'):
+                self.store.save_session_result(session.id, result)
             await self.store.update_job(job_id, JobStatus.complete, 100, "报告已完成")
 
         except Exception as exc:

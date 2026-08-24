@@ -156,6 +156,14 @@ export interface GatewayStatus {
   error?: string;
 }
 
+/** Mirrors `llm_config::LlmConfig`. Non-secret LLM settings stored as JSON. */
+export interface LlmConfig {
+  text_endpoint: string;
+  text_model: string;
+  audio_endpoint: string;
+  workspace_id: string;
+}
+
 export class DesktopRuntimeRequiredError extends Error {
   constructor(operation: string) {
     super(`${operation} is available only in the installed memEcho desktop app.`);
@@ -287,4 +295,24 @@ export const bridge = {
     invoke<void>("set_gateway_url", { gatewayUrl }),
 
   getGatewayUrl: () => invoke<string | null>("get_gateway_url"),
+
+  getLlmConfig: () => invoke<LlmConfig>("get_llm_config"),
+
+  setLlmConfigFile: (config: LlmConfig) =>
+    invoke<void>("set_llm_config_file", { ...config }),
+
+  startLiveStream: (
+    source: "system" | "mic" | "mixed",
+    micDeviceId?: string | null,
+    renderDeviceId?: string | null,
+  ) =>
+    invoke<void>("start_live_stream", {
+      source,
+      micDeviceId: micDeviceId ?? null,
+      renderDeviceId: renderDeviceId ?? null,
+    }),
+
+  pollLivePcm: () => invoke<string>("poll_live_pcm"),
+
+  stopLiveStream: () => invoke<void>("stop_live_stream"),
 };

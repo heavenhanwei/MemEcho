@@ -279,6 +279,7 @@ class Evidence(ContractModel):
     segment_id: str
     excerpt: str
     quality_flags: list[str]
+    track: str | None = None
 
     @model_validator(mode="after")
     def has_ordered_range(self) -> "Evidence":

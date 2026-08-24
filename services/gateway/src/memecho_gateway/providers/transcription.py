@@ -140,12 +140,21 @@ class TranscriptionDownloader:
     @staticmethod
     def _transcription_url(task_result: dict[str, Any]) -> str:
         """Read Qwen FileTrans result URL, with legacy Fun-ASR fallback."""
-        output = task_result.get("output", {})
+        if not isinstance(task_result, dict):
+            raise RuntimeError("transcription task result is not a dict")
+        output = task_result.get("output")
+        if not isinstance(output, dict):
+            raise RuntimeError("transcription task output is missing or invalid")
         result = output.get("result")
         if isinstance(result, dict) and result.get("transcription_url"):
             return str(result["transcription_url"])
 
-        for item in output.get("results", []):
+        results = output.get("results")
+        if not isinstance(results, list):
+            raise RuntimeError("transcription task returned no result URL")
+        for item in results:
+            if not isinstance(item, dict):
+                continue
             if item.get("subtask_status") == "FAILED":
                 raise RuntimeError(
                     str(item.get("code") or "transcription task failed")
@@ -157,7 +166,11 @@ class TranscriptionDownloader:
     @staticmethod
     def _transcription_urls(task_result: dict[str, Any]) -> list[str]:
         """Return every successful result URL without exposing it in errors."""
-        output = task_result.get("output", {})
+        if not isinstance(task_result, dict):
+            raise RuntimeError("transcription task result is not a dict")
+        output = task_result.get("output")
+        if not isinstance(output, dict):
+            raise RuntimeError("transcription task output is missing or invalid")
         result = output.get("result")
         if isinstance(result, dict) and result.get("transcription_url"):
             return [str(result["transcription_url"])]
@@ -238,6 +251,8 @@ class TranscriptionDownloader:
 
     @staticmethod
     def _normalize_result(data: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            return {"transcript": [], "language": "zh", "duration_ms": None}
         segments: list[dict[str, Any]] = []
         for transcript in data.get("transcripts", []):
             for sentence in transcript.get("sentences", []):

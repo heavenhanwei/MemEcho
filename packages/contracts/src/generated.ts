@@ -92,7 +92,25 @@ export interface Evidence {
   segment_id: string;
   excerpt: string;
   quality_flags: string[];
+  track?: string | null;
 }
+
+export interface FileTransDetails {
+  status: ProcessingStage;
+  error_code?: string | null;
+  elapsed_ms?: number | null;
+  phase?: FileTransPhase;
+  poll_attempts?: number;
+  next_poll_after_ms?: number | null;
+  last_polled_at?: string | null;
+  retryable?: boolean;
+  task_reference?: string | null;
+  sentence_count?: number | null;
+  language?: string | null;
+  audio_duration_ms?: number | null;
+}
+
+export type FileTransPhase = "not_started" | "submitting" | "queued" | "polling" | "downloading" | "normalizing" | "succeeded" | "failed" | "timed_out";
 
 export type FlexibleContractObject = Record<string, unknown>;
 
@@ -129,6 +147,12 @@ export interface ModelManifestEntry {
   model: string;
 }
 
+export interface ModuleDetails {
+  status: ProcessingStage;
+  error_code?: string | null;
+  elapsed_ms?: number | null;
+}
+
 export interface Participant {
   id: string;
   name: string;
@@ -142,6 +166,20 @@ export interface ParticipantContentAnalysis {
   attitudes: string[];
   influence_summary: string[];
 }
+
+export interface ProcessingDetailsResponse {
+  session_id: string;
+  updated_at: string;
+  tracks: TrackProcessingDetails[];
+  aligned_segment_count: number;
+  submitted_to_qwen: boolean;
+  qwen_status: ProcessingStage;
+  qwen_error_code?: string | null;
+  transcript_segments: TranscriptSnippet[];
+  transcript_truncated: boolean;
+}
+
+export type ProcessingStage = "queued" | "running" | "succeeded" | "failed" | "skipped";
 
 export interface Provenance {
   skill_version: string;
@@ -166,6 +204,27 @@ export interface SelfEchoEffect {
   observed_followup: string;
   confidence: number;
   evidence_refs: string[];
+}
+
+export interface TrackProcessingDetails {
+  upload_id: string;
+  file_name: string;
+  track: string;
+  mime_type: string;
+  size_bytes: number;
+  upload_status: ProcessingStage;
+  received_chunks: number;
+  expected_chunks: number;
+  oss_status: ProcessingStage;
+  modules: Record<string, ModuleDetails>;
+  filetrans: FileTransDetails;
+}
+
+export interface TranscriptSnippet {
+  speaker_id: string;
+  start_ms: number;
+  end_ms: number;
+  text: string;
 }
 
 export interface VadPoint {

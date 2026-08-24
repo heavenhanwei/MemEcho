@@ -325,12 +325,32 @@ pub mod wasapi {
     }
     unsafe impl Send for WasapiBackend {}
 
+    /// Initialize COM on the current thread, tolerating already-initialized
+    /// apartments. Tauri's WebView2 main thread is typically STA; trying to
+    /// switch to MTA raises RPC_E_CHANGED_MODE. We accept whatever model is
+    /// already set (S_FALSE) or succeed on first init (S_OK).
+    fn com_init_tolerant() -> Result<(), CaptureError> {
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+            // S_OK (0) or S_FALSE (already initialized, compatible) are fine.
+            // RPC_E_CHANGED_MODE means another apartment model is active —
+            // we can still use COM APIs, just not switch models.
+            if hr.is_ok() || hr == windows::core::HRESULT(1) {
+                return Ok(());
+            }
+            // Try apartment-threaded as a fallback (matches WebView2 STA)
+            let hr2 = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if hr2.is_ok() || hr2 == windows::core::HRESULT(1) {
+                return Ok(());
+            }
+            Err(CaptureError::ComInit)
+        }
+    }
+
     impl AudioBackend for WasapiBackend {
         fn enumerate_devices(&self) -> Result<Vec<AudioDevice>, CaptureError> {
             unsafe {
-                CoInitializeEx(None, COINIT_MULTITHREADED)
-                    .ok()
-                    .map_err(|_| CaptureError::ComInit)?;
+                com_init_tolerant()?;
                 let enumerator: IMMDeviceEnumerator =
                     CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
                         .map_err(|e| CaptureError::Wasapi(format!("CoCreateInstance: {e}")))?;
@@ -378,9 +398,7 @@ pub mod wasapi {
             is_capture: bool,
         ) -> Result<AudioDevice, CaptureError> {
             unsafe {
-                CoInitializeEx(None, COINIT_MULTITHREADED)
-                    .ok()
-                    .map_err(|_| CaptureError::ComInit)?;
+                com_init_tolerant()?;
                 let enumerator: IMMDeviceEnumerator =
                     CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
                         .map_err(|e| CaptureError::Wasapi(format!("CoCreateInstance: {e}")))?;
@@ -421,9 +439,7 @@ pub mod wasapi {
             bytes_written: Arc<AtomicU64>,
         ) -> Result<CaptureThreadResult, CaptureError> {
             unsafe {
-                CoInitializeEx(None, COINIT_MULTITHREADED)
-                    .ok()
-                    .map_err(|_| CaptureError::ComInit)?;
+                com_init_tolerant()?;
                 capture_loop_impl(device, wav, stop, pause, bytes_written)
             }
         }

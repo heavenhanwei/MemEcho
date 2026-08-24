@@ -528,3 +528,115 @@ pub fn set_gateway_url(gateway_url: String, state: State<'_, AppState>) -> Resul
 pub fn get_gateway_url(state: State<'_, AppState>) -> Option<String> {
     crate::gateway_check::load_saved_gateway_url(&state.sessions_dir)
 }
+
+// --- LLM config ---
+
+/// Load user LLM configuration (endpoints, model names, workspace ID).
+/// API keys are stored separately in Windows Credential Manager.
+#[tauri::command]
+pub fn get_llm_config(state: State<'_, AppState>) -> crate::llm_config::LlmConfig {
+    crate::llm_config::load_llm_config(&state.sessions_dir)
+}
+
+/// Save user LLM configuration (non-secret fields only).
+/// API keys are saved via credential_set.
+#[tauri::command]
+pub fn set_llm_config_file(
+    text_endpoint: String,
+    text_model: String,
+    audio_endpoint: String,
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    crate::llm_config::save_llm_config(
+        &state.sessions_dir,
+        &crate::llm_config::LlmConfig {
+            text_endpoint,
+            text_model,
+            audio_endpoint,
+            workspace_id,
+        },
+    )
+}
+
+// ── Live PCM streaming (native audio → frontend for real-time captioning) ──
+
+/// Start a native live PCM stream that captures system audio, microphone, or both.
+/// The stream buffers 16kHz mono PCM16 LE bytes that the frontend polls via `poll_live_pcm`.
+///
+/// `source`: "system" (loopback), "mic" (microphone), "mixed" (both averaged).
+#[tauri::command]
+pub fn start_live_stream(
+    source: String,
+    mic_device_id: Option<String>,
+    render_device_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use crate::audio::live_pcm;
+
+    let mut guard = state.live.stream.lock();
+    if guard.is_some() {
+        return Err("live stream already active".into());
+    }
+
+    let stream = live_pcm::start_live_stream(
+        &source,
+        mic_device_id.as_deref(),
+        render_device_id.as_deref(),
+    )?;
+    *guard = Some(stream);
+    Ok(())
+}
+
+/// Poll buffered PCM bytes from the live stream. Returns a base64-encoded string
+/// of 16kHz mono PCM16 LE data. Returns empty string if no data is available.
+#[tauri::command]
+pub fn poll_live_pcm(state: State<'_, AppState>) -> Result<String, String> {
+    let guard = state.live.stream.lock();
+    match guard.as_ref() {
+        Some(stream) => {
+            let bytes = stream.poll();
+            if bytes.is_empty() {
+                Ok(String::new())
+            } else {
+                Ok(base64_encode(&bytes))
+            }
+        }
+        None => Err("no active live stream".into()),
+    }
+}
+
+/// Stop the live PCM stream and return any remaining buffered data.
+#[tauri::command]
+pub fn stop_live_stream(state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.live.stream.lock();
+    if let Some(mut stream) = guard.take() {
+        stream.stop();
+    }
+    Ok(())
+}
+
+/// Encode bytes as base64 (no external dependency — inline implementation).
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}

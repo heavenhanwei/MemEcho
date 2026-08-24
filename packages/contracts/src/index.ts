@@ -1,5 +1,13 @@
 export * from "./generated";
 
+// Backward-compatible aliases for names used in the codebase before
+// ProcessingDetails types were auto-generated.
+export type {
+  ProcessingDetailsResponse as ProcessingDetails,
+  ModuleDetails as ProcessingModuleDetails,
+  FileTransDetails as FileTransProcessingDetails,
+} from "./generated";
+
 export type JobStatus =
   | "queued"
   | "uploading"

@@ -1,0 +1,9 @@
+{
+  "name": "@memecho/demo-samples",
+  "version": "0.1.0",
+  "private": true,
+  "description": "脱敏路演演示样例 — 录音元数据与 memEcho 1.1 分析报告",
+  "scripts": {
+    "validate": "node validate.mjs"
+  }
+}

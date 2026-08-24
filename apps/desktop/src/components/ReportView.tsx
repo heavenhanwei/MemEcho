@@ -150,7 +150,7 @@ export function ReportView({
       setClipStatus("导入会话暂不支持证据回听。");
       return;
     }
-    const track = (evidence as typeof evidence & { track?: EvidenceTrack }).track;
+    const track = evidence.track as EvidenceTrack | null | undefined;
     if (!track) {
       setClipStatus("此证据缺少音轨信息，无法安全回听。 ");
       return;

@@ -130,7 +130,7 @@ def _mock_text_only_result(
 
 class MockProvider:
     async def analyze(
-        self, session: dict[str, Any], tracks: list[str], request: dict[str, Any]
+        self, session: dict[str, Any], tracks: list[str], request: dict[str, Any], **kwargs
     ) -> dict[str, Any]:
         request_id = request["request_id"]
         if not tracks:
@@ -272,6 +272,7 @@ class MockProvider:
                     "segment_id": "seg_01",
                     "excerpt": "我们先确认一下今天要解决的问题。",
                     "quality_flags": [],
+                    "track": "mic",
                 },
                 {
                     "id": "ev_02",
@@ -282,6 +283,7 @@ class MockProvider:
                     "segment_id": "seg_02",
                     "excerpt": "我们好像一直在绕开真正的问题。",
                     "quality_flags": [],
+                    "track": "system",
                 },
                 {
                     "id": "ev_03",
@@ -292,6 +294,7 @@ class MockProvider:
                     "segment_id": "seg_03",
                     "excerpt": "我们先把这一版必须完成的部分定下来。",
                     "quality_flags": ["mock_acoustic_evidence"],
+                    "track": "mic",
                 },
             ],
             "uncertainties": ["当前为脱敏演示适配器，真实音频链路需配置百炼与 OSS。"],
@@ -303,7 +306,7 @@ class MockProvider:
             "memory": {"written": False, "consent_basis": None},
         }
 
-    async def chat(self, question: str, context: dict[str, Any]) -> str:
+    async def chat(self, question: str, context: dict[str, Any], **kwargs) -> str:
         return (
             f"你问的是“{question}”。从本次会谈证据看，可以先区分可核验事实与偏好，"
             "再用一个可回应的问题确认双方是否共享同一决策标准。"

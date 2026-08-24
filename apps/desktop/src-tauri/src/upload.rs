@@ -425,8 +425,10 @@ pub async fn upload_session_tracks_impl(
     gateway_base_url: String,
     sessions_dir: &Path,
 ) -> Result<UploadSessionTracksResult, UploadError> {
-    let token = crate::credential::credential_get("gateway_token")
-        .map_err(|e| UploadError::Credential(format!("failed to read gateway_token: {}", e)))?;
+    // Read gateway token from Credential Manager. If not configured (e.g. local
+    // dev with empty MEMECHO_DEMO_TOKEN), fall back to empty string — the gateway
+    // will accept requests without a token when its own token is empty.
+    let token = crate::credential::credential_get("gateway_token").unwrap_or_default();
 
     upload_session_tracks_with_token(
         local_session_id,

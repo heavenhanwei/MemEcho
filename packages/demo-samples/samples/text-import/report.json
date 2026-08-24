@@ -1,0 +1,314 @@
+{
+  "schema_version": "1.1",
+  "request_id": "demo-text-001",
+  "analysis_mode": "text_only",
+  "scope": {
+    "single_session": true,
+    "signals_used": ["transcript", "linguistic"],
+    "signals_missing": ["acoustic", "pitch", "energy", "speech_rate", "voice_quality"],
+    "quality": 0.72,
+    "target_participant_ids": ["speaker_1", "speaker_2", "speaker_3"],
+    "self_participant_id": null,
+    "self_identity_basis": "unknown"
+  },
+  "minutes": {
+    "summary": "三人周会同步各自进展并分配下周任务。张明汇报录音模块重构完成但上传有偶发问题；李薇反馈实时字幕为高频用户需求；王涛提出百炼实时 ASR 降级策略。三方就下周三外部评审的演示准备达成分工。",
+    "focus": ["录音模块稳定性", "实时字幕体验", "外部评审准备"],
+    "consensus": ["上传问题今天排查，明天出修复", "演示先用 mock 模式跑通再切真实链路", "王涛负责演示框架，李薇准备 demo 音频"],
+    "disagreements": [],
+    "explicit_actions": [
+      {
+        "text": "排查上传分块校验偶发失败问题，明天出修复",
+        "owner": "speaker_1",
+        "due_at": null,
+        "origin": "discussed",
+        "status": "confirmed",
+        "evidence_refs": ["ev_01"]
+      },
+      {
+        "text": "准备 demo 音频文件",
+        "owner": "speaker_2",
+        "due_at": null,
+        "origin": "discussed",
+        "status": "confirmed",
+        "evidence_refs": ["ev_06"]
+      },
+      {
+        "text": "搭建演示材料框架",
+        "owner": "speaker_3",
+        "due_at": null,
+        "origin": "discussed",
+        "status": "confirmed",
+        "evidence_refs": ["ev_07"]
+      }
+    ],
+    "recommendations": [
+      {
+        "text": "为实时字幕实现网络自适应降级策略",
+        "owner": "speaker_3",
+        "due_at": null,
+        "origin": "suggested",
+        "status": "proposed",
+        "evidence_refs": ["ev_03"]
+      }
+    ]
+  },
+  "content_analysis": [
+    {
+      "participant_id": "speaker_1",
+      "fact_claims": [
+        "录音模块重构已完成，双轨稳定性提升",
+        "上传分块校验偶发失败，疑似网络抖动"
+      ],
+      "opinions": [
+        "演示应先用 mock 模式验证再切真实链路"
+      ],
+      "attitudes": [
+        "务实、以排查为导向"
+      ],
+      "influence_summary": [
+        "提出 mock-first 演示策略后，其他两人未提出异议，直接按此分工"
+      ]
+    },
+    {
+      "participant_id": "speaker_2",
+      "fact_claims": [
+        "实时字幕是用户反馈中的高频需求",
+        "当前临时字幕延迟较大"
+      ],
+      "opinions": [
+        "多人会议录音做 demo 效果更有说服力"
+      ],
+      "attitudes": [
+        "关注用户体验，推动产品改进"
+      ],
+      "influence_summary": [
+        "提出实时字幕需求后，王涛立即给出技术方案，说明需求描述足够具体"
+      ]
+    },
+    {
+      "participant_id": "speaker_3",
+      "fact_claims": [
+        "百炼有实时 ASR 接口",
+        "延迟和准确率与网络环境关系大"
+      ],
+      "opinions": [
+        "应实现网络自适应降级策略"
+      ],
+      "attitudes": [
+        "技术导向，主动提出解决方案"
+      ],
+      "influence_summary": [
+        "提出降级策略后，讨论从'要不要做'转向'怎么做'，推动了决策收敛"
+      ]
+    }
+  ],
+  "participants": [
+    {"id": "speaker_1", "name": "张明", "is_self": false},
+    {"id": "speaker_2", "name": "李薇", "is_self": false},
+    {"id": "speaker_3", "name": "王涛", "is_self": false}
+  ],
+  "vad_series": [
+    {
+      "participant_id": "speaker_1",
+      "segment_id": "seg_01",
+      "v": 0.10,
+      "a": 0.35,
+      "d": 0.30,
+      "scale": "-1..1",
+      "confidence": 0.55,
+      "linguistic_weight": 1.0,
+      "acoustic_weight": 0.0,
+      "evidence_refs": ["ev_01"]
+    },
+    {
+      "participant_id": "speaker_2",
+      "segment_id": "seg_02",
+      "v": -0.15,
+      "a": 0.42,
+      "d": 0.25,
+      "scale": "-1..1",
+      "confidence": 0.52,
+      "linguistic_weight": 1.0,
+      "acoustic_weight": 0.0,
+      "evidence_refs": ["ev_02"]
+    },
+    {
+      "participant_id": "speaker_3",
+      "segment_id": "seg_03",
+      "v": 0.05,
+      "a": 0.38,
+      "d": 0.40,
+      "scale": "-1..1",
+      "confidence": 0.50,
+      "linguistic_weight": 1.0,
+      "acoustic_weight": 0.0,
+      "evidence_refs": ["ev_03"]
+    },
+    {
+      "participant_id": "speaker_1",
+      "segment_id": "seg_04",
+      "v": 0.15,
+      "a": 0.30,
+      "d": 0.35,
+      "scale": "-1..1",
+      "confidence": 0.53,
+      "linguistic_weight": 1.0,
+      "acoustic_weight": 0.0,
+      "evidence_refs": ["ev_04"]
+    },
+    {
+      "participant_id": "speaker_2",
+      "segment_id": "seg_05",
+      "v": 0.08,
+      "a": 0.35,
+      "d": 0.28,
+      "scale": "-1..1",
+      "confidence": 0.51,
+      "linguistic_weight": 1.0,
+      "acoustic_weight": 0.0,
+      "evidence_refs": ["ev_05"]
+    },
+    {
+      "participant_id": "speaker_3",
+      "segment_id": "seg_06",
+      "v": 0.12,
+      "a": 0.32,
+      "d": 0.38,
+      "scale": "-1..1",
+      "confidence": 0.54,
+      "linguistic_weight": 1.0,
+      "acoustic_weight": 0.0,
+      "evidence_refs": ["ev_06"]
+    }
+  ],
+  "interaction_events": [
+    {
+      "type": "task_assignment",
+      "at_ms": 0,
+      "description": "张明分配排查任务给自己"
+    },
+    {
+      "type": "task_assignment",
+      "at_ms": 0,
+      "description": "李薇负责 demo 音频，王涛负责演示框架"
+    }
+  ],
+  "self_echo": {
+    "participant_id": null,
+    "identity_basis": "unknown",
+    "effects": [],
+    "alternatives": []
+  },
+  "coaching": {
+    "enabled": false,
+    "status": "not_requested",
+    "scenes": []
+  },
+  "insights": [
+    {
+      "id": "in_01",
+      "claim": "三人会议的讨论效率较高，每个议题从提出到决策平均不超过 3 轮发言。",
+      "claim_level": "computed",
+      "confidence": 0.85,
+      "evidence_refs": ["ev_01", "ev_02", "ev_03"],
+      "alternatives": ["效率高可能因为议题事先已部分沟通"]
+    },
+    {
+      "id": "in_02",
+      "claim": "王涛的技术方案（降级策略）在提出后立即被采纳，说明技术建议与业务需求匹配度高。",
+      "claim_level": "interpreted",
+      "confidence": 0.70,
+      "evidence_refs": ["ev_03", "ev_04"],
+      "alternatives": ["采纳可能因为时间紧迫没有深入讨论替代方案"]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ev_01",
+      "source_type": "transcript",
+      "speaker_id": "speaker_1",
+      "start_ms": 0,
+      "end_ms": 0,
+      "segment_id": "seg_01",
+      "excerpt": "上周主要在做客户端的录音模块重构，现在双轨录音的稳定性比之前好很多。但是上传那边还有个偶发的问题，分块校验偶尔会失败，我怀疑是网络抖动导致的。",
+      "quality_flags": []
+    },
+    {
+      "id": "ev_02",
+      "source_type": "transcript",
+      "speaker_id": "speaker_2",
+      "start_ms": 0,
+      "end_ms": 0,
+      "segment_id": "seg_02",
+      "excerpt": "我这边在整理用户反馈。有一个高频问题是，用户希望在录音过程中能看到实时字幕。目前我们虽然有临时字幕功能，但延迟比较大，体验不够好。",
+      "quality_flags": []
+    },
+    {
+      "id": "ev_03",
+      "source_type": "transcript",
+      "speaker_id": "speaker_3",
+      "start_ms": 0,
+      "end_ms": 0,
+      "segment_id": "seg_03",
+      "excerpt": "实时字幕这个我了解一些，百炼那边有实时 ASR 的接口，但延迟和准确率跟网络环境关系很大。我建议我们先做一个降级策略——网络好的时候走实时，网络差的时候自动切到本地缓存。",
+      "quality_flags": []
+    },
+    {
+      "id": "ev_04",
+      "source_type": "transcript",
+      "speaker_id": "speaker_1",
+      "start_ms": 0,
+      "end_ms": 0,
+      "segment_id": "seg_04",
+      "excerpt": "同意。另外上传那个问题我今天再看一下日志，如果能复现的话明天出修复。",
+      "quality_flags": []
+    },
+    {
+      "id": "ev_05",
+      "source_type": "transcript",
+      "speaker_id": "speaker_2",
+      "start_ms": 0,
+      "end_ms": 0,
+      "segment_id": "seg_05",
+      "excerpt": "好的。还有个事，下周三有个外部评审，我们需要准备一份演示材料。我建议用上次那个多人会议的录音做 demo，效果比较有说服力。",
+      "quality_flags": []
+    },
+    {
+      "id": "ev_06",
+      "source_type": "transcript",
+      "speaker_id": "speaker_3",
+      "start_ms": 0,
+      "end_ms": 0,
+      "segment_id": "seg_06",
+      "excerpt": "演示材料我可以帮忙做。不过我们需要确认一下，演示环境是用真实百炼还是 mock 模式？",
+      "quality_flags": []
+    },
+    {
+      "id": "ev_07",
+      "source_type": "transcript",
+      "speaker_id": "speaker_1",
+      "start_ms": 0,
+      "end_ms": 0,
+      "segment_id": "seg_07",
+      "excerpt": "先用 mock 模式跑通流程，确认所有环节都没问题之后再切真实链路。这样评审的时候不会出意外。",
+      "quality_flags": []
+    }
+  ],
+  "uncertainties": [
+    "纯文本导入无音频信号，VAD 分析仅基于语言特征，置信度较低",
+    "未指定'我'的身份，无法生成自我回声分析",
+    "文本来源为会议转写，可能存在转写偏差"
+  ],
+  "provenance": {
+    "skill_version": "1.0.2",
+    "service_version": "0.1.0",
+    "model_manifest": [
+      {"provider": "mock", "model": "deterministic-text-demo"}
+    ]
+  },
+  "memory": {
+    "written": false,
+    "consent_basis": null
+  }
+}

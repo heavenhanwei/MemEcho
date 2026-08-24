@@ -14,7 +14,8 @@ from ..models import AnalysisResult
 SYSTEM_PROMPT = """你是 memEcho 对话分析服务。只分析可观察的表达，不诊断心理状态，不推断隐藏意图。
 严格输出 memEcho 1.1 JSON。事实主张只表示可核验类型，不表示已核实。明确行动必须是 discussed/confirmed，
 分析建议必须是 suggested/proposed。每项重要解释必须引用 evidence_refs、confidence 和 alternatives。
-VAD 表示情境中的表达状态，不表示真实内心。仅可使用输入中明确提供的语言和声学证据。"""
+VAD 表示情境中的表达状态，不表示真实内心。仅可使用输入中明确提供的语言和声学证据。
+每项 evidence 必须包含 track 字段，值为 "mic" 或 "system"，表示该证据来源于麦克风轨还是系统音频轨。"""
 
 
 TEXT_ONLY_PROMPT = """TEXT-ONLY MODE: no audio or acoustic observation is available.
@@ -31,19 +32,29 @@ class BailianProvider:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    async def _chat_completion(self, messages: list[dict[str, Any]]) -> str:
-        if not self.settings.bailian_text_base_url or not self.settings.bailian_text_api_key:
+    async def _chat_completion(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+    ) -> str:
+        effective_key = api_key or self.settings.bailian_text_api_key
+        effective_url = (base_url or self.settings.bailian_text_base_url).rstrip("/")
+        effective_model = model or self.settings.bailian_text_model
+        if not effective_url or not effective_key:
             raise RuntimeError("Bailian text endpoint is not configured")
         payload = {
-            "model": self.settings.bailian_text_model,
+            "model": effective_model,
             "messages": messages,
             "temperature": 0.1,
             "max_tokens": 16384,
             "enable_thinking": False,
             "response_format": {"type": "json_object"},
         }
-        headers = {"Authorization": f"Bearer {self.settings.bailian_text_api_key}"}
-        url = f"{self.settings.bailian_text_base_url.rstrip('/')}/chat/completions"
+        headers = {"Authorization": f"Bearer {effective_key}"}
+        url = f"{effective_url}/chat/completions"
         async with httpx.AsyncClient(timeout=180) as client:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
@@ -78,7 +89,7 @@ class BailianProvider:
                 item["status"] = "proposed"
 
     async def analyze(
-        self, session: dict[str, Any], tracks: list[str], request: dict[str, Any]
+        self, session: dict[str, Any], tracks: list[str], request: dict[str, Any], **kwargs
     ) -> dict[str, Any]:
         source = request.get("source") or {}
         result_schema = AnalysisResult.model_json_schema()
@@ -100,7 +111,8 @@ class BailianProvider:
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
-            ]
+            ],
+            **kwargs,
         )
         try:
             result = self._extract_json(text)
@@ -115,7 +127,8 @@ class BailianProvider:
                         ),
                     },
                     {"role": "user", "content": text},
-                ]
+                ],
+                **kwargs,
             )
             result = self._extract_json(repaired)
 
@@ -164,13 +177,14 @@ class BailianProvider:
                         ensure_ascii=False,
                     ),
                 },
-            ]
+            ],
+            **kwargs,
         )
         result = self._extract_json(repaired)
         self._enforce_conservative_recommendations(result)
         return result
 
-    async def chat(self, question: str, context: dict[str, Any]) -> str:
+    async def chat(self, question: str, context: dict[str, Any], **kwargs) -> str:
         return await self._chat_completion(
             [
                 {
@@ -183,6 +197,6 @@ class BailianProvider:
                         {"question": question, "context": context}, ensure_ascii=False
                     ),
                 },
-            ]
+            ],
+            **kwargs,
         )
-
