@@ -206,9 +206,18 @@ class Orchestrator:
         }
         for name, value, exc in outcomes:
             if exc is not None:
-                log.warning("Audio model failed source=%s", name, exc_info=exc)
+                # Do not log the exception itself: vendor messages can embed
+                # signed result URLs. The stable error code is enough.
+                log.warning(
+                    "Audio model failed source=%s error_code=%s",
+                    name,
+                    processing_details.safe_error_code(exc),
+                )
                 collected["errors"].append(
-                    {"source": name, "error_code": type(exc).__name__}
+                    {
+                        "source": name,
+                        "error_code": processing_details.safe_error_code(exc),
+                    }
                 )
                 if name == "transcription" and session is not None and upload_id is not None:
                     error_phase = (
@@ -237,13 +246,16 @@ class Orchestrator:
                         )
                 except Exception as normalize_exc:
                     log.warning(
-                        "Audio model result normalization failed source=fun_asr",
-                        exc_info=normalize_exc,
+                        "Audio model result normalization failed source=fun_asr "
+                        "error_code=%s",
+                        processing_details.safe_error_code(normalize_exc),
                     )
                     collected["errors"].append(
                         {
                             "source": "fun_asr",
-                            "error_code": type(normalize_exc).__name__,
+                            "error_code": processing_details.safe_error_code(
+                                normalize_exc
+                            ),
                         }
                     )
                     if session is not None and upload_id is not None:
@@ -351,13 +363,16 @@ class Orchestrator:
             request=request,
             **text_kwargs,
         )
-        processing_details.set_qwen(session, ProcessingStage.succeeded)
         enforce_text_only_metadata(result)
         result["_evidence_weights"] = evidence_weights
 
         errors = validate_result(result, text_segments=text_segments)
         if errors:
+            processing_details.set_qwen(
+                session, ProcessingStage.failed, "invalid_upstream_result"
+            )
             raise _contract_error(errors)
+        processing_details.set_qwen(session, ProcessingStage.succeeded)
 
         await self.store.update_job(
             job_id, JobStatus.rendering, 90, "Rendering local report"
@@ -533,7 +548,6 @@ class Orchestrator:
                 request=request,
                 **text_kwargs,
             )
-            processing_details.set_qwen(session, ProcessingStage.succeeded)
 
             if result.get("analysis_mode") == "text_only":
                 # Providers may conservatively downgrade an audio session when
@@ -556,7 +570,11 @@ class Orchestrator:
 
             errors = validate_result(result)
             if errors:
+                processing_details.set_qwen(
+                    session, ProcessingStage.failed, "invalid_upstream_result"
+                )
                 raise _contract_error(errors)
+            processing_details.set_qwen(session, ProcessingStage.succeeded)
 
             await self.store.update_job(job_id, JobStatus.rendering, 90, "生成本地报告")
             result["rendered_markdown"] = render_markdown(result)

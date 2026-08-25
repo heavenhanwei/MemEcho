@@ -198,7 +198,7 @@ async def test_candidates_and_resume_use_same_job_state(client: TestClient, monk
 def test_analyze_preserves_first_request_for_idempotent_job(client: TestClient, monkeypatch):
     session_payload = create_session(client)
 
-    async def fake_run(job_id: str, session_id: str, request: dict):
+    async def fake_run(job_id: str, session_id: str, request: dict, overrides=None):
         return None
 
     monkeypatch.setattr(orchestrator, "run", fake_run)

@@ -94,7 +94,11 @@ class TranscriptionDownloader:
             on_phase("submitting")
         t0 = time.monotonic()
         task_id = await self.dashscope.submit_transcription_task(url)
-        log.info("FileTrans submitted task_id=%s url=%s", task_id, _sanitize_url_for_log(url))
+        log.info(
+            "FileTrans submitted task_ref=%s url=%s",
+            DashScopeClient.sanitize_task_id(task_id),
+            _sanitize_url_for_log(url),
+        )
 
         if on_phase:
             on_phase("queued", task_reference=DashScopeClient.sanitize_task_id(task_id))
@@ -155,7 +159,7 @@ class TranscriptionDownloader:
         for item in results:
             if not isinstance(item, dict):
                 continue
-            if item.get("subtask_status") == "FAILED":
+            if (item.get("subtask_status") or item.get("status")) == "FAILED":
                 raise RuntimeError(
                     str(item.get("code") or "transcription task failed")
                 )
@@ -179,7 +183,7 @@ class TranscriptionDownloader:
         for item in output.get("results", []):
             if not isinstance(item, dict):
                 continue
-            if item.get("subtask_status") == "FAILED":
+            if (item.get("subtask_status") or item.get("status")) == "FAILED":
                 raise RuntimeError(str(item.get("code") or "transcription task failed"))
             if item.get("transcription_url"):
                 urls.append(str(item["transcription_url"]))
@@ -250,30 +254,69 @@ class TranscriptionDownloader:
         return intervals
 
     @staticmethod
-    def _normalize_result(data: dict[str, Any]) -> dict[str, Any]:
+    def _to_ms(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _normalize_text(value: Any) -> str:
+        """Normalize mixed CRLF/CR newlines so downstream matching is stable."""
+        return str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    @classmethod
+    def _normalize_result(cls, data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(data, dict):
             return {"transcript": [], "language": "zh", "duration_ms": None}
         segments: list[dict[str, Any]] = []
-        for transcript in data.get("transcripts", []):
-            for sentence in transcript.get("sentences", []):
+        transcripts = data.get("transcripts")
+        if not isinstance(transcripts, list):
+            transcripts = []
+        for transcript in transcripts:
+            if not isinstance(transcript, dict):
+                continue
+            sentences = transcript.get("sentences")
+            if not isinstance(sentences, list):
+                continue
+            for sentence in sentences:
+                if not isinstance(sentence, dict):
+                    continue
+                start_ms = cls._to_ms(sentence.get("begin_time"))
+                end_ms = cls._to_ms(sentence.get("end_time"))
+                if start_ms is None or end_ms is None:
+                    continue
+                text = cls._normalize_text(sentence.get("text"))
+                if not text:
+                    continue
+                try:
+                    emotion_confidence = float(
+                        sentence.get("emotion_confidence", 0.0) or 0.0
+                    )
+                except (TypeError, ValueError):
+                    emotion_confidence = 0.0
                 speaker = sentence.get("speaker_id", transcript.get("channel_id", 0))
                 segments.append(
                     {
                         "speaker_id": f"speaker_{speaker}",
-                        "start_ms": int(sentence.get("begin_time", 0)),
-                        "end_ms": int(sentence.get("end_time", 0)),
-                        "text": str(sentence.get("text", "")),
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                        "text": text,
                         "confidence": 0.9,
                         "emotion": str(sentence.get("emotion", "unknown")),
-                        "emotion_confidence": float(
-                            sentence.get("emotion_confidence", 0.0) or 0.0
-                        ),
+                        "emotion_confidence": emotion_confidence,
                     }
                 )
+        properties = data.get("properties")
+        duration_ms = (
+            properties.get("original_duration_in_milliseconds")
+            if isinstance(properties, dict)
+            else None
+        )
         return {
-            "transcript": [segment for segment in segments if segment["text"].strip()],
+            "transcript": segments,
             "language": "zh",
-            "duration_ms": data.get("properties", {}).get("original_duration_in_milliseconds"),
+            "duration_ms": duration_ms,
         }
 
     def _mock_transcription(self, url: str) -> dict[str, Any]:

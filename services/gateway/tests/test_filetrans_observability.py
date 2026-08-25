@@ -231,7 +231,7 @@ async def test_filetrans_failure_reports_module_and_safe_code(tmp_path):
     # Alignment must not fabricate segments when FileTrans failed.
     assert provider.session_input["observations"]["aligned_segments"] == []
     errors = provider.session_input["observations"]["model_errors"]
-    assert {"source": "transcription", "error_code": "RuntimeError"} in errors
+    assert {"source": "transcription", "error_code": "upstream_task_failed"} in errors
 
     details = processing_details.build_response(session)
     track = details.tracks[0]

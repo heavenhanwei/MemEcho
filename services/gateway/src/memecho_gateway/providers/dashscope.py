@@ -25,6 +25,11 @@ PhaseCallback = Callable[..., None]
 
 _TRANSCRIPTION_SUFFIX = "/api/v1/services/audio/asr/transcription"
 
+# Synthetic task id for the bill-free credentials probe; it can never exist,
+# so a successful lookup is impossible by design and only auth/endpoint
+# behavior is observed.
+_PROBE_TASK_ID = "00000000-0000-0000-0000-000000000000"
+
 # Audio MIME types DashScope FileTrans is known to accept.
 _SUPPORTED_AUDIO_MIMES = frozenset({
     "audio/wav",
@@ -45,6 +50,26 @@ def _sanitize_url_for_log(url: str) -> str:
     """Return a URL safe for logging — strips query params (signatures)."""
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
+def _output_dict(data: Any) -> dict[str, Any]:
+    """Defensively extract ``output`` from a DashScope response.
+
+    Submit and poll responses share the ``output`` envelope but differ in
+    which fields they carry; upstream may also return null/missing fields.
+    Returning an empty dict keeps callers free of KeyError/AttributeError.
+    """
+    if isinstance(data, dict):
+        output = data.get("output")
+        if isinstance(output, dict):
+            return output
+    return {}
+
+
+def _failure_detail(output: dict[str, Any]) -> str:
+    """Bounded, sanitized upstream failure detail (code only, no URLs)."""
+    code = str(output.get("code") or "").strip()
+    return code[:64] or "unknown"
 
 
 def validate_audio_url(url: str, *, content_type: str | None = None) -> None:
@@ -140,12 +165,40 @@ class DashScopeClient:
             resp = await client.post(submit_url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            if not isinstance(data, dict):
-                raise ValueError("DashScope submit returned non-dict response")
-            task_id = data.get("output", {}).get("task_id")
-            if not task_id:
+            task_id = _output_dict(data).get("task_id")
+            if not isinstance(task_id, str) or not task_id:
                 raise RuntimeError("No task_id in DashScope response")
         return task_id
+
+    async def probe_credentials(
+        self, *, api_key: str, base_url: str
+    ) -> tuple[bool, str | None]:
+        """Protocol-correct, bill-free capability probe for FileTrans.
+
+        Queries the async task-status endpoint with a synthetic task id.
+        DashScope validates credentials before the task lookup, so:
+
+        - 401/403 -> the API key was rejected;
+        - any other non-5xx -> endpoint reachable and credentials accepted
+          (task-not-found is the expected outcome for the synthetic id);
+        - 5xx / network failure -> endpoint problem.
+
+        No transcription task is created, so the probe is never billable.
+        """
+        if not api_key or not base_url:
+            return False, "缺少 API Key 或 Endpoint"
+        url = self._build_tasks_url(_PROBE_TASK_ID, base_url=base_url)
+        headers = {"Authorization": f"Bearer {api_key}"}
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            return False, f"连接失败: {type(exc).__name__}"
+        if resp.status_code in (401, 403):
+            return False, f"认证失败: API Key 无效或无权限 (HTTP {resp.status_code})"
+        if resp.status_code >= 500:
+            return False, f"上游返回 HTTP {resp.status_code}"
+        return True, None
 
     async def poll_task_result(
         self,
@@ -176,9 +229,8 @@ class DashScopeClient:
                 resp = await client.get(url, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
-                if not isinstance(data, dict):
-                    raise ValueError("DashScope poll returned non-dict response")
-                status = data.get("output", {}).get("task_status", "")
+                output = _output_dict(data)
+                status = str(output.get("task_status") or "")
                 next_ms = int(_POLL_BACKOFF[(attempt + 1) % len(_POLL_BACKOFF)] * 1000)
                 if on_phase:
                     on_phase(
@@ -193,7 +245,11 @@ class DashScopeClient:
                 if status == "FAILED":
                     if on_phase:
                         on_phase("failed", elapsed_ms=elapsed_ms, task_reference=task_ref)
-                    raise RuntimeError(f"DashScope task {task_id} failed: {data}")
+                    # Never embed the raw vendor payload: it may carry signed
+                    # result URLs. Only the stable upstream code is surfaced.
+                    raise RuntimeError(
+                        f"DashScope task {task_ref} failed: {_failure_detail(output)}"
+                    )
                 log.debug("DashScope poll attempt=%d status=%s", attempt + 1, status)
         raise TimeoutError(f"DashScope task timed out after {_MAX_POLL_ATTEMPTS} polls")
 
@@ -266,11 +322,9 @@ class DashScopeClient:
             resp = await client.post(submit_url, json=submit_payload, headers=headers)
             resp.raise_for_status()
             task_data = resp.json()
-            if not isinstance(task_data, dict):
-                raise ValueError("DashScope submit returned non-dict response")
-            task_id = task_data.get("output", {}).get("task_id")
-            if not task_id:
-                raise RuntimeError(f"No task_id in DashScope response: {task_data}")
+            task_id = _output_dict(task_data).get("task_id")
+            if not isinstance(task_id, str) or not task_id:
+                raise RuntimeError("No task_id in DashScope response")
 
         return await self._poll_result(task_id, headers, base_url=base_url)
 
@@ -284,15 +338,20 @@ class DashScopeClient:
                 resp = await client.get(url, headers={"Authorization": headers["Authorization"]})
                 resp.raise_for_status()
                 data = resp.json()
-                if not isinstance(data, dict):
-                    raise ValueError("DashScope poll returned non-dict response")
-                status = data.get("output", {}).get("task_status", "")
+                output = _output_dict(data)
+                status = str(output.get("task_status") or "")
                 if status == "SUCCEEDED":
                     return data
                 if status == "FAILED":
-                    raise RuntimeError(f"DashScope task {task_id} failed: {data}")
+                    raise RuntimeError(
+                        f"DashScope task {self.sanitize_task_id(task_id)} failed: "
+                        f"{_failure_detail(output)}"
+                    )
                 log.debug("DashScope poll attempt=%d status=%s", attempt + 1, status)
-        raise TimeoutError(f"DashScope task {task_id} timed out after {_MAX_POLL_ATTEMPTS} polls")
+        raise TimeoutError(
+            f"DashScope task {self.sanitize_task_id(task_id)} timed out after "
+            f"{_MAX_POLL_ATTEMPTS} polls"
+        )
 
     def _mock_fun_asr_result(self, audio_url: str) -> dict[str, Any]:
         return {

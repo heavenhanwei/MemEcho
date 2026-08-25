@@ -255,21 +255,15 @@ async def test_llm_connection(request: Request, payload: LlmTestRequest) -> LlmT
         resolved = resolve_audio_settings(request)
         if not resolved["api_key"] or not resolved["base_url"]:
             return LlmTestResponse(ok=False, error="缺少 API Key 或 Endpoint")
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    f"{resolved['base_url'].rstrip('/')}/api/v1/services/audio/asr/transcription",
-                    headers={"Authorization": f"Bearer {resolved['api_key']}"},
-                )
-                # DashScope transcription expects POST with JSON body; a bare
-                # GET will return 400/405/404 etc.  Any 4xx confirms the
-                # endpoint is reachable and the auth header was processed.
-                # Only 5xx and connection errors indicate infrastructure failure.
-                if resp.status_code < 500:
-                    return LlmTestResponse(ok=True)
-                return LlmTestResponse(ok=False, error=f"上游返回 HTTP {resp.status_code}")
-        except Exception as e:
-            return LlmTestResponse(ok=False, error=f"连接失败: {type(e).__name__}")
+        # Bill-free capability probe: querying the async task-status endpoint
+        # with a synthetic task id validates credentials and endpoint
+        # reachability without creating a paid transcription task. The
+        # explicit paid end-to-end check lives in
+        # scripts/filetrans_smoke.py and must be opted into manually.
+        ok, error = await dashscope_client.probe_credentials(
+            api_key=resolved["api_key"], base_url=resolved["base_url"],
+        )
+        return LlmTestResponse(ok=ok, error=error)
 
     return LlmTestResponse(ok=False, error=f"未知的 kind: {payload.kind}")
 

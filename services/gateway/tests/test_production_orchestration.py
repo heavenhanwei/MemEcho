@@ -169,7 +169,7 @@ async def test_remote_model_failure_is_retained_as_degradation(tmp_path):
 
     assert result["diarization"] == []
     assert result["emotions"][0]["emotion"] == "neutral"
-    assert result["errors"] == [{"source": "fun_asr", "error_code": "TimeoutError"}]
+    assert result["errors"] == [{"source": "fun_asr", "error_code": "upstream_timeout"}]
 
 
 async def test_fun_asr_result_url_is_downloaded_and_normalized(tmp_path, monkeypatch):
