@@ -31,6 +31,27 @@ vi.mock("./lib/api", () => ({
   setGatewayUrl: vi.fn().mockResolvedValue(undefined),
   setGatewayToken: vi.fn().mockResolvedValue(undefined),
   initGatewayConfig: vi.fn().mockResolvedValue("http://127.0.0.1:8787"),
+  GatewayApiError: class GatewayApiError extends Error {
+    constructor(
+      public readonly status: number,
+      detail: string,
+    ) {
+      super(detail);
+      this.name = "GatewayApiError";
+    }
+  },
+  initLlmConfig: vi.fn().mockResolvedValue(undefined),
+  getLlmConfigState: vi.fn(() => ({
+    textEndpoint: "",
+    textModel: "",
+    audioEndpoint: "",
+    workspaceId: "",
+    hasTextApiKey: false,
+    hasAudioApiKey: false,
+  })),
+  hasLlmConfig: () => false,
+  setLlmConfig: vi.fn().mockResolvedValue(undefined),
+  clearLlmConfig: vi.fn().mockResolvedValue(undefined),
 }));
 
 class FakeMediaStream {
@@ -305,6 +326,39 @@ describe("App (live resilience and Tauri desktop)", () => {
     expect(gateway.createSession).toHaveBeenCalled();
     expect(FakeMediaRecorder.instances).toHaveLength(0);
     expect(await screen.findByText(/音量计不可用/)).toBeInTheDocument();
+  });
+
+  it("pauses and resumes the native live caption stream with the recording", async () => {
+    const calls: Array<{ cmd: string; args: unknown }> = [];
+    mockIPC((cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "list_audio_devices") return [];
+      if (cmd === "start_capture") {
+        return { session_id: "native-pause", mic_path: "m.wav", loopback_path: "l.wav" };
+      }
+      if (cmd === "poll_live_pcm") return "";
+      return null;
+    });
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValue(new Error("denied"));
+
+    render(<App />);
+    fireEvent.click(screen.getByText("点击球体，开始录音"));
+    expect(await screen.findByText("正在录音")).toBeInTheDocument();
+    expect(calls.some((call) => call.cmd === "start_live_stream")).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+    await waitFor(() =>
+      expect(calls.some((call) => call.cmd === "pause_capture")).toBe(true),
+    );
+    expect(calls.some((call) => call.cmd === "pause_live_stream")).toBe(true);
+    expect(screen.getByText("录音已暂停")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() =>
+      expect(calls.some((call) => call.cmd === "resume_capture")).toBe(true),
+    );
+    expect(calls.some((call) => call.cmd === "resume_live_stream")).toBe(true);
+    expect(screen.getByText("正在录音")).toBeInTheDocument();
   });
 
   it("lists interrupted sessions in Echoes and recovers one", async () => {

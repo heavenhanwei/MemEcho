@@ -116,6 +116,21 @@ pub fn start_capture(
     };
     meta.save(&session_dir).map_err(|e| e.to_string())?;
 
+    // Register the session in the local SQLite index immediately so the
+    // WAV files and session list stay consistent, even if the app exits
+    // before stop_capture runs.
+    state
+        .db
+        .create_session(
+            &session_id,
+            None,
+            mic_wav_path.to_str(),
+            loopback_wav_path.to_str(),
+            16000,
+            Some("recording"),
+        )
+        .map_err(|e| format!("failed to register local session: {e}"))?;
+
     Ok(CaptureInfo {
         session_id,
         mic_path: mic_wav_path,
@@ -162,6 +177,11 @@ pub fn stop_capture(state: State<'_, AppState>) -> Result<StopResult, String> {
 
     let audio_result = audio.stop();
 
+    let ended_at = chrono::Utc::now().to_rfc3339();
+    let duration_secs = stop_info
+        .started_at
+        .map(|started| (chrono::Utc::now() - started).num_milliseconds() as f64 / 1000.0);
+
     match audio_result {
         Ok((mic_result, loop_result)) => {
             // Both tracks succeeded — write Finalized with confirmed bytes
@@ -175,6 +195,18 @@ pub fn stop_capture(state: State<'_, AppState>) -> Result<StopResult, String> {
                 RecoveryStatus::Finalized,
                 None,
             );
+
+            if let Err(e) = state.db.update_session(
+                &stop_info.session_id,
+                None,
+                Some("completed"),
+                Some(&ended_at),
+                duration_secs,
+                Some("finalized"),
+                None,
+            ) {
+                eprintln!("[stop_capture] db update failed: {e}");
+            }
 
             Ok(StopResult {
                 session_id: stop_info.session_id,
@@ -201,6 +233,18 @@ pub fn stop_capture(state: State<'_, AppState>) -> Result<StopResult, String> {
                 RecoveryStatus::Failed,
                 Some(e.to_string()),
             );
+
+            if let Err(db_err) = state.db.update_session(
+                &stop_info.session_id,
+                None,
+                Some("failed"),
+                Some(&ended_at),
+                duration_secs,
+                Some("failed"),
+                Some(&e.to_string()),
+            ) {
+                eprintln!("[stop_capture] db update failed: {db_err}");
+            }
 
             Err(e.to_string())
         }
@@ -573,6 +617,8 @@ pub fn start_live_stream(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     use crate::audio::live_pcm;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     let mut guard = state.live.stream.lock();
     if guard.is_some() {
@@ -583,9 +629,38 @@ pub fn start_live_stream(
         &source,
         mic_device_id.as_deref(),
         render_device_id.as_deref(),
+        Arc::new(AtomicBool::new(false)),
     )?;
     *guard = Some(stream);
     Ok(())
+}
+
+/// Pause the live PCM stream: capture keeps running but no audio is emitted
+/// until `resume_live_stream`, so subtitles stop while local WAV recording
+/// remains under the separate `pause_capture` control.
+#[tauri::command]
+pub fn pause_live_stream(state: State<'_, AppState>) -> Result<(), String> {
+    let guard = state.live.stream.lock();
+    match guard.as_ref() {
+        Some(stream) => {
+            stream.set_paused(true);
+            Ok(())
+        }
+        None => Err("no active live stream".into()),
+    }
+}
+
+/// Resume emission of a paused live PCM stream.
+#[tauri::command]
+pub fn resume_live_stream(state: State<'_, AppState>) -> Result<(), String> {
+    let guard = state.live.stream.lock();
+    match guard.as_ref() {
+        Some(stream) => {
+            stream.set_paused(false);
+            Ok(())
+        }
+        None => Err("no active live stream".into()),
+    }
 }
 
 /// Poll buffered PCM bytes from the live stream. Returns a base64-encoded string

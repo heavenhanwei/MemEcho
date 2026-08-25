@@ -12,6 +12,7 @@
 param(
     [ValidateRange(1, 65535)]
     [int]$Port = 8787,
+    [ValidateSet("mock", "bailian")]
     [string]$Provider = "mock",
     [string]$Token = "change-me"
 )
@@ -25,6 +26,21 @@ $GatewayDir = Join-Path -Path $ProjectDir -ChildPath "services\gateway"
 if (-not (Test-Path (Join-Path $GatewayDir "pyproject.toml"))) {
     Write-Error "Gateway not found at $GatewayDir — check that the memecho-desktop project is complete."
     exit 1
+}
+
+# The gateway treats ANY value other than "bailian" as mock, so bailian mode
+# must never degrade silently. Verify the credential environment variables are
+# present in this process; if they live in services/gateway/.env instead the
+# gateway will still pick them up (this script never reads that file).
+if ($Provider -eq "bailian") {
+    $missing = @()
+    foreach ($name in @("BAILIAN_REALTIME_WS_URL", "BAILIAN_TEXT_API_KEY", "BAILIAN_AUDIO_API_KEY", "BAILIAN_WORKSPACE_ID")) {
+        if (-not [Environment]::GetEnvironmentVariable($name)) { $missing += $name }
+    }
+    if ($missing.Count -gt 0) {
+        Write-Warning ("Bailian requested, but these are not set in the current environment: " + ($missing -join ", "))
+        Write-Warning "They must exist in services/gateway/.env, otherwise realtime captions/analysis will fail (mock is NOT a silent fallback)."
+    }
 }
 
 # Check Python. Prefer the project virtual environment so a stale Windows Store
@@ -97,14 +113,19 @@ for ($i = 0; $i -lt 15; $i++) {
         Write-Host "Gateway is healthy." -ForegroundColor Green
         Write-Host "  Provider: $($health.provider)"
         if ($health.version) { Write-Host "  Version:  $($health.version)" }
+        if ("$($health.provider)" -ne $Provider) {
+            Write-Warning "Requested provider '$Provider' but the gateway on port $Port reports '$($health.provider)'."
+            Write-Warning "A different gateway instance may already occupy this port — realtime behavior will follow the reported provider."
+        }
         Write-Host ""
         break
     } catch { }
 }
 if (-not $ready) {
     Write-Host ""
-    Write-Host "Gateway did not become healthy within 15 seconds. It may still be starting." -ForegroundColor Yellow
-    Write-Host "Check the gateway window for errors." -ForegroundColor Yellow
+    Write-Host "Gateway did not become healthy within 15 seconds. It may still be starting," -ForegroundColor Yellow
+    Write-Host "or port $Port may already be in use by another process. Check the gateway log" -ForegroundColor Yellow
+    Write-Host "and verify http://127.0.0.1:$Port/v1/health manually." -ForegroundColor Yellow
     Write-Host ""
 }
 
@@ -114,5 +135,6 @@ try {
 } finally {
     Remove-Job $gatewayJob -Force -ErrorAction SilentlyContinue
     Write-Host ""
-    Write-Host "Gateway has stopped." -ForegroundColor Cyan
+    Write-Host "Gateway has stopped. You can close this window." -ForegroundColor Cyan
+    Write-Host "To start it again, run: scripts\start-gateway.ps1" -ForegroundColor DarkGray
 }

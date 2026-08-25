@@ -173,9 +173,7 @@ function NowPage() {
   const localSessionId = useRef<string | null>(null);
   const workflow = useRef<WorkflowContext | null>(null);
   const progressAbort = useRef<AbortController | null>(null);
-  const [source, setSource] = useState<"microphone" | "mixed">(() =>
-    isTauri ? "mixed" : "microphone",
-  );
+  const [source, setSource] = useState<"microphone" | "mixed">("microphone");
   const [error, setError] = useState("");
   const [meterNote, setMeterNote] = useState("");
   const [devices, setDevices] = useState<AudioDevice[]>([]);
@@ -556,8 +554,7 @@ function NowPage() {
     } catch {
       setLiveStatus("offline");
     } finally {
-      stream.current?.getTracks().forEach((track) => track.stop());
-      stream.current = null;
+      stopMeter();
       await stopBrowserCapture?.();
       // Stop native WASAPI live stream if active
       if (isTauri) {
@@ -613,10 +610,10 @@ function NowPage() {
           renderDeviceId || null,
         );
         localSessionId.current = capture.session_id;
-        // Start native WASAPI live stream for real-time captioning.
-        // "microphone" source uses system loopback (WASAPI loopback has the
-        // actual audio); "mixed" uses both mic + loopback averaged.
-        const liveSource = source === "mixed" ? "mixed" : "system";
+        // Start native WASAPI live stream for real-time captioning, reusing
+        // the native capture audio source: "mic" for microphone-only,
+        // "mixed" for microphone + system loopback averaged.
+        const liveSource = source === "mixed" ? "mixed" : "mic";
         try {
           await bridge.startLiveStream(
             liveSource,
@@ -628,6 +625,19 @@ function NowPage() {
           setMeterNote(
             `实时字幕流不可用：${describeError(liveErr, "原生音频流启动失败")}（不影响本地录音）`,
           );
+        }
+        // Volume meter uses a browser microphone stream; native recording
+        // and captions keep working if the browser refuses microphone access.
+        if (typeof navigator.mediaDevices?.getUserMedia === "function") {
+          try {
+            const meterMedia = await navigator.mediaDevices.getUserMedia({ audio: true });
+            stream.current = meterMedia;
+            startMeter(meterMedia);
+          } catch {
+            setMeterNote("音量计不可用（不影响录音与实时字幕）");
+          }
+        } else {
+          setMeterNote("音量计不可用（不影响录音与实时字幕）");
         }
       } else {
         backend.current = "web";
@@ -701,6 +711,10 @@ function NowPage() {
       }
       state.patch({ soulState: paused ? "recording" : "paused" });
       liveCapture.current?.setPaused(!paused);
+      if (backend.current === "tauri" && nativeLiveActive.current) {
+        if (paused) await bridge.resumeLiveStream().catch(() => undefined);
+        else await bridge.pauseLiveStream().catch(() => undefined);
+      }
     } catch (cause) {
       setError(describeError(cause, "无法切换暂停状态"));
     }
@@ -1198,6 +1212,11 @@ function NowPage() {
               </select>
             </label>
           </div>
+        )}
+        {isTauri && source === "microphone" && (
+          <p className="live-scope-note">
+            实时字幕仅使用麦克风；正式报告仍使用本地麦克风＋系统输出双轨录音。
+          </p>
         )}
         {isTauri && source === "mixed" && (
           <p className="live-scope-note">

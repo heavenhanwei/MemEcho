@@ -70,6 +70,8 @@ pub fn run() {
             commands::get_llm_config,
             commands::set_llm_config_file,
             commands::start_live_stream,
+            commands::pause_live_stream,
+            commands::resume_live_stream,
             commands::poll_live_pcm,
             commands::stop_live_stream,
         ])

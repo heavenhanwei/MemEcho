@@ -312,6 +312,10 @@ export const bridge = {
       renderDeviceId: renderDeviceId ?? null,
     }),
 
+  pauseLiveStream: () => invoke<void>("pause_live_stream"),
+
+  resumeLiveStream: () => invoke<void>("resume_live_stream"),
+
   pollLivePcm: () => invoke<string>("poll_live_pcm"),
 
   stopLiveStream: () => invoke<void>("stop_live_stream"),

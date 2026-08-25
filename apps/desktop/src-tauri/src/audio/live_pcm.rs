@@ -17,6 +17,27 @@ fn f32_to_i16_bytes(samples: &[f32]) -> Vec<u8> {
     b
 }
 
+/// Average two PCM16 LE byte streams sample-by-sample into a new stream.
+/// Only the overlapping prefix is mixed; a silent or missing track passes
+/// the other track through unchanged.
+fn mix_pcm16(a: &[u8], b: &[u8]) -> Vec<u8> {
+    if a.is_empty() {
+        return b.to_vec();
+    }
+    if b.is_empty() {
+        return a.to_vec();
+    }
+    let len = a.len().min(b.len());
+    let mut out = Vec::with_capacity(len);
+    for i in (0..len).step_by(2) {
+        let x = i16::from_le_bytes([a[i], a[i + 1]]) as f32;
+        let y = i16::from_le_bytes([b[i], b[i + 1]]) as f32;
+        let avg = ((x + y) / 2.0).clamp(-32768.0, 32767.0) as i16;
+        out.extend_from_slice(&avg.to_le_bytes());
+    }
+    out
+}
+
 /// Linear resampler from native sample rate to TARGET_SAMPLE_RATE.
 struct Resampler {
     ratio: f64,
@@ -56,11 +77,18 @@ type SharedBuffer = Arc<Mutex<Vec<u8>>>;
 /// but does NOT join them — call `stop()` for a clean shutdown.
 pub struct LiveStream {
     stop_flag: Arc<AtomicBool>,
+    pause_flag: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     buffer: SharedBuffer,
 }
 
 impl LiveStream {
+    /// Pause or resume emission. While paused, capture keeps running but
+    /// no PCM is appended to the buffer (and buffered data stays intact).
+    pub fn set_paused(&self, paused: bool) {
+        self.pause_flag.store(paused, Ordering::SeqCst);
+    }
+
     /// Drain all buffered PCM bytes (thread-safe, brief lock).
     pub fn poll(&self) -> Vec<u8> {
         let mut buf = self.buffer.lock();
@@ -131,11 +159,13 @@ pub mod wasapi_live {
         source: &str,
         mic_device_id: Option<&str>,
         render_device_id: Option<&str>,
+        pause: Arc<AtomicBool>,
     ) -> Result<LiveStream, String> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let buffer: SharedBuffer = Arc::new(Mutex::new(Vec::new()));
 
         let stop = stop_flag.clone();
+        let pause_flag = pause.clone();
         let buf = buffer.clone();
         let src = source.to_string();
         let mic_id = mic_device_id.map(|s| s.to_string());
@@ -145,7 +175,7 @@ pub mod wasapi_live {
             .name("live-pcm".into())
             .spawn(move || {
                 if let Err(e) =
-                    live_capture_loop(&src, mic_id.as_deref(), ren_id.as_deref(), stop, buf)
+                    live_capture_loop(&src, mic_id.as_deref(), ren_id.as_deref(), stop, pause, buf)
                 {
                     eprintln!("[live_pcm] capture error: {e}");
                 }
@@ -154,6 +184,7 @@ pub mod wasapi_live {
 
         Ok(LiveStream {
             stop_flag,
+            pause_flag,
             handle: Some(handle),
             buffer,
         })
@@ -161,11 +192,13 @@ pub mod wasapi_live {
 
     /// The live capture loop. For "system" or "mic", uses a single WASAPI client.
     /// For "mixed", uses two clients running in the same thread with simple interleaved reads.
+    /// While `pause` is set, capture keeps draining devices but no PCM is emitted.
     fn live_capture_loop(
         source: &str,
         mic_device_id: Option<&str>,
         render_device_id: Option<&str>,
         stop: Arc<AtomicBool>,
+        pause: Arc<AtomicBool>,
         buffer: SharedBuffer,
     ) -> Result<(), String> {
         com_init_tolerant()?;
@@ -173,12 +206,12 @@ pub mod wasapi_live {
         match source {
             "system" => {
                 let mut ctx = LiveCaptureContext::open_loopback(render_device_id)?;
-                run_single_capture(&mut ctx, &stop, &buffer);
+                run_single_capture(&mut ctx, &stop, &pause, &buffer);
                 ctx.shutdown();
             }
             "mic" => {
                 let mut ctx = LiveCaptureContext::open_mic(mic_device_id)?;
-                run_single_capture(&mut ctx, &stop, &buffer);
+                run_single_capture(&mut ctx, &stop, &pause, &buffer);
                 ctx.shutdown();
             }
             "mixed" => {
@@ -189,6 +222,8 @@ pub mod wasapi_live {
 
                 let mic_stop = stop.clone();
                 let sys_stop = stop.clone();
+                let mic_pause = pause.clone();
+                let sys_pause = pause.clone();
                 let mic_b = mic_buf.clone();
                 let sys_b = sys_buf.clone();
                 let mic_id_owned = mic_device_id.map(|s| s.to_string());
@@ -199,7 +234,7 @@ pub mod wasapi_live {
                     .spawn(move || {
                         com_init_tolerant().ok();
                         if let Ok(mut ctx) = LiveCaptureContext::open_mic(mic_id_owned.as_deref()) {
-                            run_single_capture(&mut ctx, &mic_stop, &mic_b);
+                            run_single_capture(&mut ctx, &mic_stop, &mic_pause, &mic_b);
                             ctx.shutdown();
                         }
                     })
@@ -212,7 +247,7 @@ pub mod wasapi_live {
                         if let Ok(mut ctx) =
                             LiveCaptureContext::open_loopback(ren_id_owned.as_deref())
                         {
-                            run_single_capture(&mut ctx, &sys_stop, &sys_b);
+                            run_single_capture(&mut ctx, &sys_stop, &sys_pause, &sys_b);
                             ctx.shutdown();
                         }
                     })
@@ -229,27 +264,11 @@ pub mod wasapi_live {
                         std::mem::take(&mut *b)
                     };
 
-                    let mixed = if mic_data.is_empty() && sys_data.is_empty() {
-                        Vec::new()
-                    } else if mic_data.is_empty() {
-                        sys_data
-                    } else if sys_data.is_empty() {
-                        mic_data
-                    } else {
-                        // Average the two i16 LE streams sample-by-sample
-                        let len = mic_data.len().min(sys_data.len());
-                        let mut out = Vec::with_capacity(len);
-                        for i in (0..len).step_by(2) {
-                            let m = i16::from_le_bytes([mic_data[i], mic_data[i + 1]]) as f32;
-                            let s = i16::from_le_bytes([sys_data[i], sys_data[i + 1]]) as f32;
-                            let avg = ((m + s) / 2.0).clamp(-32768.0, 32767.0) as i16;
-                            out.extend_from_slice(&avg.to_le_bytes());
+                    if !pause.load(Ordering::SeqCst) {
+                        let mixed = mix_pcm16(&mic_data, &sys_data);
+                        if !mixed.is_empty() {
+                            buffer.lock().extend_from_slice(&mixed);
                         }
-                        out
-                    };
-
-                    if !mixed.is_empty() {
-                        buffer.lock().extend_from_slice(&mixed);
                     }
 
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -261,25 +280,11 @@ pub mod wasapi_live {
                 // Drain any remaining data from sub-buffers
                 let final_mic: Vec<u8> = { std::mem::take(&mut *mic_buf.lock()) };
                 let final_sys: Vec<u8> = { std::mem::take(&mut *sys_buf.lock()) };
-                let final_mixed = if final_mic.is_empty() && final_sys.is_empty() {
-                    Vec::new()
-                } else if final_mic.is_empty() {
-                    final_sys
-                } else if final_sys.is_empty() {
-                    final_mic
-                } else {
-                    let len = final_mic.len().min(final_sys.len());
-                    let mut out = Vec::with_capacity(len);
-                    for i in (0..len).step_by(2) {
-                        let m = i16::from_le_bytes([final_mic[i], final_mic[i + 1]]) as f32;
-                        let s = i16::from_le_bytes([final_sys[i], final_sys[i + 1]]) as f32;
-                        let avg = ((m + s) / 2.0).clamp(-32768.0, 32767.0) as i16;
-                        out.extend_from_slice(&avg.to_le_bytes());
+                if !pause.load(Ordering::SeqCst) {
+                    let final_mixed = mix_pcm16(&final_mic, &final_sys);
+                    if !final_mixed.is_empty() {
+                        buffer.lock().extend_from_slice(&final_mixed);
                     }
-                    out
-                };
-                if !final_mixed.is_empty() {
-                    buffer.lock().extend_from_slice(&final_mixed);
                 }
             }
             other => return Err(format!("unknown live source: {other}")),
@@ -413,9 +418,12 @@ pub mod wasapi_live {
     }
 
     /// Run a single WASAPI capture loop, pushing PCM16 LE bytes into `buffer`.
+    /// While `pause` is set, packets are still drained (WASAPI shared mode
+    /// requires continuous reads) but not buffered.
     fn run_single_capture(
         ctx: &mut LiveCaptureContext,
         stop: &Arc<AtomicBool>,
+        pause: &Arc<AtomicBool>,
         buffer: &SharedBuffer,
     ) {
         loop {
@@ -472,6 +480,9 @@ pub mod wasapi_live {
                 mono
             };
 
+            if pause.load(Ordering::SeqCst) {
+                continue;
+            }
             let resampled = ctx.resampler.process(&mono_f32);
             if !resampled.is_empty() {
                 let pcm = f32_to_i16_bytes(&resampled);
@@ -553,8 +564,10 @@ pub mod mock_live {
         source: &str,
         _mic_device_id: Option<&str>,
         _render_device_id: Option<&str>,
+        pause: Arc<AtomicBool>,
     ) -> Result<LiveStream, String> {
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let pause_flag = pause.clone();
         let buffer: SharedBuffer = Arc::new(Mutex::new(Vec::new()));
         let stop = stop_flag.clone();
         let buf = buffer.clone();
@@ -566,7 +579,7 @@ pub mod mock_live {
                 // Generate silence at 16kHz mono 16-bit LE: 320 bytes = 10ms per chunk
                 let chunk = vec![0u8; 320];
                 while !stop.load(Ordering::SeqCst) {
-                    if src != "none" {
+                    if src != "none" && !pause.load(Ordering::SeqCst) {
                         buf.lock().extend_from_slice(&chunk);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -576,6 +589,7 @@ pub mod mock_live {
 
         Ok(LiveStream {
             stop_flag,
+            pause_flag,
             handle: Some(handle),
             buffer,
         })
@@ -587,18 +601,20 @@ pub mod mock_live {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Start a live PCM stream. Platform-aware: WASAPI on Windows, mock elsewhere.
+/// `pause` controls emission: while set, capture keeps running but no PCM is buffered.
 pub fn start_live_stream(
     source: &str,
     mic_device_id: Option<&str>,
     render_device_id: Option<&str>,
+    pause: Arc<AtomicBool>,
 ) -> Result<LiveStream, String> {
     #[cfg(windows)]
     {
-        wasapi_live::start_live_stream(source, mic_device_id, render_device_id)
+        wasapi_live::start_live_stream(source, mic_device_id, render_device_id, pause)
     }
     #[cfg(not(windows))]
     {
-        mock_live::start_live_stream(source, mic_device_id, render_device_id)
+        mock_live::start_live_stream(source, mic_device_id, render_device_id, pause)
     }
 }
 
@@ -613,19 +629,24 @@ mod tests {
     /// Create a mock LiveStream that generates PCM16 silence at 16kHz mono.
     fn mock_live_stream(chunk_interval_ms: u64) -> LiveStream {
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let pause_flag = Arc::new(AtomicBool::new(false));
         let buffer: SharedBuffer = Arc::new(Mutex::new(Vec::new()));
         let stop = stop_flag.clone();
+        let pause = pause_flag.clone();
         let buf = buffer.clone();
         let handle = std::thread::spawn(move || {
             // 16kHz mono 16-bit = 32 bytes/ms. 10ms chunk = 320 bytes.
             let chunk = vec![0u8; 320];
             while !stop.load(Ordering::SeqCst) {
-                buf.lock().extend_from_slice(&chunk);
+                if !pause.load(Ordering::SeqCst) {
+                    buf.lock().extend_from_slice(&chunk);
+                }
                 std::thread::sleep(std::time::Duration::from_millis(chunk_interval_ms));
             }
         });
         LiveStream {
             stop_flag,
+            pause_flag,
             handle: Some(handle),
             buffer,
         }
@@ -726,7 +747,7 @@ mod tests {
     fn test_empty_source_stops_gracefully() {
         // "none" source: start_live_stream on non-windows returns mock with no data
         // for "none". On windows, it tries WASAPI which will fail — handle gracefully.
-        match super::start_live_stream("none", None, None) {
+        match super::start_live_stream("none", None, None, Arc::new(AtomicBool::new(false))) {
             Ok(mut stream) => {
                 std::thread::sleep(std::time::Duration::from_millis(30));
                 let data = stream.stop();
@@ -755,5 +776,62 @@ mod tests {
         let _ = stream.poll();
         let mut s = stream;
         s.stop();
+    }
+
+    fn i16_le(v: i16) -> [u8; 2] {
+        v.to_le_bytes()
+    }
+
+    #[test]
+    fn test_mix_pcm16_silent_mic_passes_system_audio() {
+        // Silent mic (empty track) + loud system: output must equal system audio,
+        // so captions survive when the microphone picks up nothing.
+        let mic: Vec<u8> = Vec::new();
+        let mut sys = Vec::new();
+        sys.extend_from_slice(&i16_le(20_000));
+        sys.extend_from_slice(&i16_le(-12_000));
+        let mixed = mix_pcm16(&mic, &sys);
+        assert_eq!(mixed, sys);
+    }
+
+    #[test]
+    fn test_mix_pcm16_averages_both_tracks() {
+        let mut mic = Vec::new();
+        mic.extend_from_slice(&i16_le(1_000));
+        mic.extend_from_slice(&i16_le(-500));
+        let mut sys = Vec::new();
+        sys.extend_from_slice(&i16_le(3_000));
+        sys.extend_from_slice(&i16_le(1_500));
+        let mixed = mix_pcm16(&mic, &sys);
+        assert_eq!(mixed.len(), 4);
+        assert_eq!(i16::from_le_bytes([mixed[0], mixed[1]]), 2_000);
+        assert_eq!(i16::from_le_bytes([mixed[2], mixed[3]]), 500);
+    }
+
+    #[test]
+    fn test_mix_pcm16_clamps_full_scale() {
+        let mic = i16_le(32_767).to_vec();
+        let sys = i16_le(32_767).to_vec();
+        let mixed = mix_pcm16(&mic, &sys);
+        assert_eq!(i16::from_le_bytes([mixed[0], mixed[1]]), 32_767);
+    }
+
+    #[test]
+    fn test_pause_stops_emission_until_resumed() {
+        let mut stream = mock_live_stream(10);
+        let _ = wait_for_data(&stream, std::time::Duration::from_millis(200));
+
+        stream.set_paused(true);
+        let _ = stream.poll();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(
+            stream.poll().is_empty(),
+            "no PCM should be emitted while paused"
+        );
+
+        stream.set_paused(false);
+        let resumed = wait_for_data(&stream, std::time::Duration::from_millis(200));
+        assert!(!resumed.is_empty(), "emission must resume after unpause");
+        stream.stop();
     }
 }

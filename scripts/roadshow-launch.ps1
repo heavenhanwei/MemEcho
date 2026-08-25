@@ -17,6 +17,7 @@
 param(
     [ValidateRange(1, 65535)]
     [int]$Port = 8787,
+    [ValidateSet("mock", "bailian")]
     [string]$Provider = "mock",
     [string]$Token = "roadshow-demo-token-2026",
     [switch]$SkipDesktop,
@@ -33,6 +34,21 @@ function Write-Step($msg) { Write-Host "`n>>> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "  OK: $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "  WARN: $msg" -ForegroundColor Yellow }
 function Write-Fail($msg) { Write-Host "  FAIL: $msg" -ForegroundColor Red }
+
+# The gateway treats ANY provider value other than "bailian" as mock. Bailian
+# mode must never degrade silently, so verify the credential environment
+# variables up front (services/gateway/.env may also provide them; this
+# script never reads that file).
+if ($Provider -eq "bailian") {
+    $missingCreds = @()
+    foreach ($name in @("BAILIAN_REALTIME_WS_URL", "BAILIAN_TEXT_API_KEY", "BAILIAN_AUDIO_API_KEY", "BAILIAN_WORKSPACE_ID")) {
+        if (-not [Environment]::GetEnvironmentVariable($name)) { $missingCreds += $name }
+    }
+    if ($missingCreds.Count -gt 0) {
+        Write-Warn ("Bailian requested, but not set in this environment: " + ($missingCreds -join ", "))
+        Write-Warn "They must exist in services/gateway/.env, otherwise realtime captions/analysis will fail (mock is NOT a silent fallback)."
+    }
+}
 
 # ─── Preflight checks ───────────────────────────────────────────────────────
 
@@ -76,6 +92,10 @@ if (-not $SkipPreflight) {
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/health" -TimeoutSec 3 -ErrorAction Stop
         Write-Warn "Gateway already running on port $Port (provider=$($health.provider)). Will reuse."
+        if ("$($health.provider)" -ne $Provider) {
+            Write-Warn "Requested provider '$Provider' but the running gateway reports '$($health.provider)'."
+            Write-Warn "Stop that gateway first if you need '$Provider' — it will NOT be replaced automatically."
+        }
         $gatewayAlreadyRunning = $true
     } catch {
         $gatewayAlreadyRunning = $false
