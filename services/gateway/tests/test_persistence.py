@@ -790,3 +790,192 @@ async def test_persistent_store_get_unfinished_jobs(store):
     assert len(unfinished) == 1
     assert unfinished[0]["id"] == job.id
     assert unfinished[0]["status"] == "transcribing"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_job_updates(store):
+    """Concurrent status updates must not lose writes or raise lock errors."""
+    import asyncio
+
+    await store.initialize()
+    create = SessionCreate(
+        title="Concurrency Test",
+        context="work",
+        occurred_at="2026-07-30T10:00:00+08:00",
+        source_mode="microphone",
+    )
+    record = await store.create_session(create)
+    job = await store.create_job(record.id, record.request_id)
+
+    async def worker(index: int):
+        await store.update_job(
+            job.id,
+            JobStatus.transcribing,
+            min(10 + index, 99),
+            f"阶段 {index}",
+        )
+
+    await asyncio.gather(*(worker(i) for i in range(20)))
+
+    jobs = load_all_jobs(store.db_path)
+    assert jobs[job.id]["status"] == "transcribing"
+    assert 10 <= jobs[job.id]["progress"] <= 99
+
+    # Simulated restart: the single persisted row must still load cleanly.
+    new_store = PersistentStore(store.data_dir, store.db_path)
+    await new_store.initialize()
+    assert new_store.jobs[job.id].status == JobStatus.transcribing
+
+
+@pytest.mark.asyncio
+async def test_idempotency_survives_restart(store):
+    """The same request_id must map to the same job after a restart."""
+    await store.initialize()
+    create = SessionCreate(
+        title="Idempotent Restart Test",
+        context="work",
+        occurred_at="2026-07-30T10:00:00+08:00",
+        source_mode="microphone",
+    )
+    record = await store.create_session(create)
+    job = await store.create_job(record.id, record.request_id)
+
+    new_store = PersistentStore(store.data_dir, store.db_path)
+    await new_store.initialize()
+    replayed = await new_store.create_job(record.id, record.request_id)
+    assert replayed.id == job.id
+    # No duplicate job row was created.
+    assert len([j for j in new_store.jobs.values() if j.session_id == record.id]) == 1
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_marks_unfinished_jobs_retryable(store):
+    """Recovery flow: unfinished jobs marked failed+retryable persist across
+    another restart."""
+    await store.initialize()
+    create = SessionCreate(
+        title="Recovery Flow Test",
+        context="work",
+        occurred_at="2026-07-30T10:00:00+08:00",
+        source_mode="microphone",
+    )
+    record = await store.create_session(create)
+    job = await store.create_job(record.id, record.request_id)
+    await store.update_job(job.id, JobStatus.transcribing, 30, "正式转写")
+
+    # Simulated restart: recovery marks every unfinished job retryable.
+    new_store = PersistentStore(store.data_dir, store.db_path)
+    await new_store.initialize()
+    for info in new_store.get_unfinished_jobs():
+        await new_store.update_job(
+            info["id"],
+            JobStatus.failed,
+            info["progress"],
+            "Gateway 重启，任务中断",
+            retryable=True,
+            error_code="gateway_restart",
+        )
+
+    jobs = load_all_jobs(new_store.db_path)
+    assert jobs[job.id]["status"] == "failed"
+    assert jobs[job.id]["retryable"] is True
+    assert jobs[job.id]["error_code"] == "gateway_restart"
+    # The retryable flag must survive another restart.
+    third_store = PersistentStore(store.data_dir, store.db_path)
+    await third_store.initialize()
+    assert third_store.jobs[job.id].retryable is True
+    assert third_store.jobs[job.id].error_code == "gateway_restart"
+    assert third_store.get_unfinished_jobs() == []
+
+
+@pytest.mark.asyncio
+async def test_update_job_without_error_fields_keeps_persisted_flags(store):
+    """A plain status update must not silently clear retryable/error state."""
+    await store.initialize()
+    create = SessionCreate(
+        title="Flag Retention Test",
+        context="work",
+        occurred_at="2026-07-30T10:00:00+08:00",
+        source_mode="microphone",
+    )
+    record = await store.create_session(create)
+    job = await store.create_job(record.id, record.request_id)
+    await store.update_job(
+        job.id,
+        JobStatus.failed,
+        40,
+        "上游失败",
+        retryable=True,
+        error_code="upstream_timeout",
+    )
+    # A later update that omits retryable/error fields must keep them.
+    await store.update_job(job.id, JobStatus.failed, 40, "仍失败")
+
+    jobs = load_all_jobs(store.db_path)
+    assert jobs[job.id]["retryable"] is True
+    assert jobs[job.id]["error_code"] == "upstream_timeout"
+
+
+@pytest.mark.asyncio
+async def test_persistent_store_delete_session_cascades(store):
+    """Deleting a session invalidates jobs, uploads and idempotency in both
+    memory and the database."""
+    await store.initialize()
+    create = SessionCreate(
+        title="Delete Cascade Test",
+        context="work",
+        occurred_at="2026-07-30T10:00:00+08:00",
+        source_mode="microphone",
+    )
+    record = await store.create_session(create)
+    job = await store.create_job(record.id, record.request_id)
+    upload = UploadRecord(
+        id="upl_del",
+        session_id=record.id,
+        track="microphone",
+        file_name="test.wav",
+        mime_type="audio/wav",
+        size=10,
+        sha256="abc",
+        directory=store.data_dir / record.id / "upl_del",
+    )
+    store.save_upload(upload)
+
+    await store.delete_session(record.id)
+
+    assert record.id not in store.sessions
+    assert job.id not in store.jobs
+    assert record.request_id not in store.idempotency
+    assert load_all_sessions(store.db_path) == {}
+    assert load_all_jobs(store.db_path) == {}
+    assert load_all_uploads(store.db_path) == {}
+    assert load_idempotency(store.db_path) == {}
+
+    # Restart must not resurrect the deleted session.
+    new_store = PersistentStore(store.data_dir, store.db_path)
+    await new_store.initialize()
+    assert record.id not in new_store.sessions
+
+
+def test_save_session_upsert_preserves_result(db_path):
+    """Re-saving a session row must not wipe result/processing columns."""
+    init_db(db_path)
+    create_data = {
+        "title": "Upsert Test",
+        "context": "work",
+        "occurred_at": "2026-07-30T10:00:00+08:00",
+        "source_mode": "import",
+        "marks": [],
+    }
+    save_session(db_path, "ses_up", "req_up", create_data)
+    update_session_result(db_path, "ses_up", {"schema_version": "1.1"})
+    update_session_processing(db_path, "ses_up", {"aligned_segment_count": 3})
+
+    # Re-save with an updated title; durable columns must survive.
+    create_data["title"] = "Upsert Test Renamed"
+    save_session(db_path, "ses_up", "req_up", create_data)
+
+    sessions = load_all_sessions(db_path)
+    assert sessions["ses_up"]["title"] == "Upsert Test Renamed"
+    assert sessions["ses_up"]["result"]["schema_version"] == "1.1"
+    assert sessions["ses_up"]["processing"]["aligned_segment_count"] == 3

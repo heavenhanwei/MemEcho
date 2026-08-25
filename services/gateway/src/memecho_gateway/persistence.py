@@ -101,7 +101,9 @@ CREATE INDEX IF NOT EXISTS idx_idempotency_job ON idempotency(job_id);
 @contextmanager
 def _connect(db_path: Path) -> Generator[sqlite3.Connection, None, None]:
     """Context manager for database connections with WAL mode."""
-    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    # Explicit busy timeout so concurrent writers under WAL wait for locks
+    # instead of raising "database is locked" immediately.
+    conn = sqlite3.connect(str(db_path), timeout=30.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -134,12 +136,23 @@ def save_session(
     request_id: str,
     create_data: dict[str, Any],
 ) -> None:
-    """Persist a new session."""
+    """Persist a new session.
+
+    Uses an upsert that only touches the create-time columns so a re-save
+    never wipes already-persisted result / processing / resolution state.
+    """
     with _connect(db_path) as conn:
         conn.execute(
-            """INSERT OR REPLACE INTO sessions
+            """INSERT INTO sessions
                (id, request_id, title, context, occurred_at, source_mode, marks, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   title = excluded.title,
+                   context = excluded.context,
+                   occurred_at = excluded.occurred_at,
+                   source_mode = excluded.source_mode,
+                   marks = excluded.marks,
+                   updated_at = excluded.updated_at""",
             (
                 session_id,
                 request_id,
@@ -339,6 +352,16 @@ def update_upload_completed(db_path: Path, upload_id: str, completed_path: str) 
         )
 
 
+def _loads_or(value: str | None, fallback: Any) -> Any:
+    if value is None:
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        log.warning("Corrupted JSON column value skipped during load")
+        return fallback
+
+
 def load_all_sessions(db_path: Path) -> dict[str, dict[str, Any]]:
     """Load all sessions from database."""
     sessions: dict[str, dict[str, Any]] = {}
@@ -353,10 +376,10 @@ def load_all_sessions(db_path: Path) -> dict[str, dict[str, Any]]:
                 "context": row["context"],
                 "occurred_at": row["occurred_at"],
                 "source_mode": row["source_mode"],
-                "marks": json.loads(row["marks"]),
-                "participant_resolution": json.loads(row["participant_resolution"]) if row["participant_resolution"] else None,
-                "result": json.loads(row["result"]) if row["result"] else None,
-                "processing": json.loads(row["processing"]),
+                "marks": _loads_or(row["marks"], []),
+                "participant_resolution": _loads_or(row["participant_resolution"], None),
+                "result": _loads_or(row["result"], None),
+                "processing": _loads_or(row["processing"], {}),
             }
     return sessions
 

@@ -129,21 +129,26 @@ class PersistentStore(MemoryStore):
         # Load sessions
         sessions_data = persistence.load_all_sessions(self.db_path)
         for session_id, data in sessions_data.items():
-            create = SessionCreate(
-                title=data["title"],
-                context=data["context"],
-                occurred_at=data["occurred_at"],
-                source_mode=data["source_mode"],
-                marks=data["marks"],
-            )
-            record = SessionRecord(
-                id=session_id,
-                request_id=data["request_id"],
-                create=create,
-                participant_resolution=data["participant_resolution"],
-                result=data["result"],
-                processing=data["processing"],
-            )
+            try:
+                create = SessionCreate(
+                    title=data["title"],
+                    context=data["context"],
+                    occurred_at=data["occurred_at"],
+                    source_mode=data["source_mode"],
+                    marks=data["marks"],
+                )
+                record = SessionRecord(
+                    id=session_id,
+                    request_id=data["request_id"],
+                    create=create,
+                    participant_resolution=data["participant_resolution"],
+                    result=data["result"],
+                    processing=data["processing"],
+                )
+            except Exception:
+                # One corrupted row must not abort gateway startup.
+                log.warning("Skipping unparsable persisted session %s", session_id, exc_info=True)
+                continue
             self.sessions[session_id] = record
 
         # Load uploads and attach to sessions
@@ -168,24 +173,36 @@ class PersistentStore(MemoryStore):
         # Load jobs
         jobs_data = persistence.load_all_jobs(self.db_path)
         for job_id, data in jobs_data.items():
-            job = JobView(
-                id=job_id,
-                session_id=data["session_id"],
-                request_id=data["request_id"],
-                status=JobStatus(data["status"]),
-                progress=data["progress"],
-                stage_label=data["stage_label"],
-                retryable=data["retryable"],
-                error_code=data["error_code"],
-                error_detail=data["error_detail"],
-                created_at=data["created_at"],
-                updated_at=data["updated_at"],
-            )
+            try:
+                job = JobView(
+                    id=job_id,
+                    session_id=data["session_id"],
+                    request_id=data["request_id"],
+                    status=JobStatus(data["status"]),
+                    progress=data["progress"],
+                    stage_label=data["stage_label"],
+                    retryable=data["retryable"],
+                    error_code=data["error_code"],
+                    error_detail=data["error_detail"],
+                    created_at=data["created_at"],
+                    updated_at=data["updated_at"],
+                )
+            except Exception:
+                log.warning("Skipping unparsable persisted job %s", job_id, exc_info=True)
+                continue
+            if job.session_id not in self.sessions:
+                log.warning("Skipping persisted job %s with missing session", job_id)
+                continue
             self.jobs[job_id] = job
             self.events[job_id] = asyncio.Queue()
 
-        # Load idempotency mappings
-        self.idempotency = persistence.load_idempotency(self.db_path)
+        # Load idempotency mappings; drop any mapping that points at a job
+        # we did not restore.
+        self.idempotency = {
+            request_id: job_id
+            for request_id, job_id in persistence.load_idempotency(self.db_path).items()
+            if job_id in self.jobs
+        }
 
         # Load analysis requests and attach to sessions
         analysis_requests = persistence.load_analysis_requests(self.db_path)
@@ -227,8 +244,11 @@ class PersistentStore(MemoryStore):
         return record
 
     async def create_job(self, session_id: str, request_id: str) -> JobView:
+        already_known = request_id in self.idempotency
         job = await super().create_job(session_id, request_id)
-        # Persist to database
+        if already_known:
+            # Idempotent hit: the job row and mapping are already persisted.
+            return job
         persistence.save_job(
             self.db_path,
             job.id,
@@ -255,16 +275,17 @@ class PersistentStore(MemoryStore):
         **extra: Any,
     ) -> JobView:
         job = await super().update_job(job_id, status, progress, label, **extra)
-        # Persist to database
+        # Persist the effective state of the job so DB and memory never
+        # diverge when a caller omits retryable/error fields.
         persistence.update_job_status(
             self.db_path,
             job_id,
             status,
             progress,
             label,
-            retryable=extra.get("retryable", False),
-            error_code=extra.get("error_code"),
-            error_detail=extra.get("error_detail"),
+            retryable=job.retryable,
+            error_code=job.error_code,
+            error_detail=job.error_detail,
         )
         # Also persist processing state if session exists
         if job.session_id in self.sessions:
@@ -331,4 +352,24 @@ class PersistentStore(MemoryStore):
     def get_unfinished_jobs(self) -> list[dict[str, Any]]:
         """Get jobs that were in progress when the server stopped."""
         return persistence.get_unfinished_jobs(self.db_path)
+
+    async def delete_session(self, session_id: str) -> None:
+        """Delete a session and invalidate all derived state (jobs, uploads,
+        idempotency mappings, analysis requests) in memory and in the DB."""
+        async with self.lock:
+            session = self.sessions.pop(session_id, None)
+            if session is None:
+                return
+            for job_id in [
+                job_id for job_id, job in self.jobs.items()
+                if job.session_id == session_id
+            ]:
+                self.jobs.pop(job_id, None)
+                self.events.pop(job_id, None)
+                self.idempotency = {
+                    request_id: mapped
+                    for request_id, mapped in self.idempotency.items()
+                    if mapped != job_id
+                }
+        persistence.delete_session(self.db_path, session_id)
 
