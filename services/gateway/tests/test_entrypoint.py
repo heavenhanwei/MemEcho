@@ -277,17 +277,20 @@ def test_compose_uses_memecho_demo_token_placeholder():
 # ── Python config defaults ───────────────────────────────────────────────────
 
 
-def test_config_default_token_is_placeholder():
+def test_config_default_token_is_placeholder(monkeypatch):
     """Default token is 'change-me' — entrypoint enforces real token in prod."""
     from memecho_gateway.config import Settings
 
-    s = Settings()
+    monkeypatch.delenv("MEMECHO_DEMO_TOKEN", raising=False)
+    # _env_file=None keeps a developer's cwd .env from overriding defaults.
+    s = Settings(_env_file=None)
     assert s.memecho_demo_token == "change-me"
 
 
-def test_config_default_provider_is_mock():
+def test_config_default_provider_is_mock(monkeypatch):
     """Default provider is 'mock' — entrypoint enforces 'bailian' in prod."""
     from memecho_gateway.config import Settings
 
-    s = Settings()
+    monkeypatch.delenv("MEMECHO_PROVIDER", raising=False)
+    s = Settings(_env_file=None)
     assert s.memecho_provider == "mock"
