@@ -3,11 +3,14 @@
 # Simplified wrapper around `pnpm tauri build`. For production releases with
 # full quality gates and clean-worktree enforcement, use build-windows-release.ps1.
 #
-# Usage:
-#   .\scripts\build-msi.ps1                                  # local dev build
-#   .\scripts\build-msi.ps1 -GatewayUrl https://gw.example.com  # baked-in URL
-#   .\scripts\build-msi.ps1 -SkipFrontend                     # skip pnpm build
-#   .\scripts\build-msi.ps1 -OutputDir C:\release             # custom output
+# Usage (GatewayUrl is required — the frontend production build refuses without it):
+#   .\scripts\build-msi.ps1 -GatewayUrl https://gateway.example.com
+#   .\scripts\build-msi.ps1 -GatewayUrl https://gateway.example.com -OutputDir C:\release
+#   .\scripts\build-msi.ps1 -GatewayUrl https://gateway.example.com -SkipFrontend
+#
+# GatewayUrl must be a clean HTTPS origin (no path/query/credentials). For local
+# acceptance use a non-sensitive placeholder like https://gateway.example.com and
+# override the gateway in app settings at runtime.
 #
 # Prerequisites:
 #   - Visual Studio 2022 Build Tools (C++ desktop dev + Windows SDK)
@@ -31,6 +34,15 @@ function Write-Ok($msg)   { Write-Host "  OK: $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "  WARN: $msg" -ForegroundColor Yellow }
 function Write-Fail($msg) { Write-Host "  FAIL: $msg" -ForegroundColor Red }
 
+# pnpm/cargo emit normal logs on stderr; with ErrorActionPreference=Stop a 2>&1
+# merge throws NativeCommandError. Lower preference while capturing; callers
+# still decide success via $LASTEXITCODE.
+function Invoke-NativeCapture([scriptblock]$Block) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $Block } finally { $ErrorActionPreference = $prev }
+}
+
 # ─── Preflight ───────────────────────────────────────────────────────────────
 
 Write-Step "Checking build prerequisites"
@@ -38,7 +50,7 @@ Write-Step "Checking build prerequisites"
 # Rust
 $rustup = Get-Command rustup -ErrorAction SilentlyContinue
 if ($rustup) {
-    $rustVer = & rustc --version 2>&1
+    $rustVer = Invoke-NativeCapture { & rustc --version 2>&1 }
     Write-Ok "Rust: $rustVer"
 } else {
     Write-Fail "Rust not found. Install from https://rustup.rs"
@@ -48,7 +60,7 @@ if ($rustup) {
 # pnpm
 $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue
 if ($pnpm) {
-    $pnpmVer = & pnpm --version 2>&1
+    $pnpmVer = Invoke-NativeCapture { & pnpm --version 2>&1 }
     Write-Ok "pnpm: v$pnpmVer"
 } else {
     Write-Fail "pnpm not found."
@@ -59,7 +71,7 @@ if ($pnpm) {
 $tauriCli = Get-Command tauri -ErrorAction SilentlyContinue
 if (-not $tauriCli) {
     # Try via pnpm
-    $tauriCheck = & pnpm tauri --version 2>&1
+    $tauriCheck = Invoke-NativeCapture { & pnpm tauri --version 2>&1 }
     if ($LASTEXITCODE -eq 0) {
         Write-Ok "Tauri CLI: via pnpm"
     } else {
@@ -71,30 +83,34 @@ if (-not $tauriCli) {
 }
 
 # Git status (warning only)
-$gitStatus = & git status --porcelain --untracked-files=no 2>&1
+$gitStatus = Invoke-NativeCapture { & git status --porcelain --untracked-files=no 2>&1 }
 if ($gitStatus) {
     Write-Warn "Working tree has uncommitted changes (non-blocking for dev build)"
 }
 
 # ─── Gateway URL ─────────────────────────────────────────────────────────────
 
-if ($GatewayUrl) {
-    Write-Step "Baking gateway URL into build"
-    $parsed = $null
-    if (-not [Uri]::TryCreate($GatewayUrl, [UriKind]::Absolute, [ref]$parsed)) {
-        Write-Fail "Invalid GatewayUrl: $GatewayUrl"
-        exit 1
-    }
-    if ($parsed.Scheme -eq "http" -and -not ($parsed.Host -in @("localhost", "127.0.0.1", "[::1]"))) {
-        Write-Fail "HTTP gateway URL only allowed for localhost. Use HTTPS for production."
-        exit 1
-    }
-    $env:VITE_GATEWAY_URL = $parsed.GetLeftPart([UriPartial]::Authority)
-    Write-Ok "VITE_GATEWAY_URL = $env:VITE_GATEWAY_URL"
-} else {
-    Write-Step "No gateway URL specified — will use runtime config"
-    Remove-Item Env:VITE_GATEWAY_URL -ErrorAction SilentlyContinue
+if (-not $GatewayUrl) {
+    Write-Fail "GatewayUrl is required. Pass a clean HTTPS origin, e.g. -GatewayUrl https://gateway.example.com"
+    exit 1
 }
+
+Write-Step "Baking gateway URL into build"
+$parsed = $null
+if (-not [Uri]::TryCreate($GatewayUrl, [UriKind]::Absolute, [ref]$parsed)) {
+    Write-Fail "Invalid GatewayUrl: $GatewayUrl"
+    exit 1
+}
+if ($parsed.Scheme -ne "https") {
+    Write-Fail "GatewayUrl must use HTTPS (got '$($parsed.Scheme)'). HTTP and localhost origins are not accepted."
+    exit 1
+}
+if ($parsed.UserInfo -or $parsed.PathAndQuery -ne "/" -or $parsed.Fragment) {
+    Write-Fail "GatewayUrl must be a clean origin without path, query, fragment, or credentials: $GatewayUrl"
+    exit 1
+}
+$env:VITE_GATEWAY_URL = $parsed.GetLeftPart([UriPartial]::Authority)
+Write-Ok "VITE_GATEWAY_URL = $env:VITE_GATEWAY_URL"
 
 # Ensure no token is embedded
 Remove-Item Env:VITE_GATEWAY_TOKEN -ErrorAction SilentlyContinue
@@ -105,7 +121,7 @@ Write-Step "Reading version info"
 
 $tauriConf = Get-Content (Join-Path $RepoRoot "apps\desktop\src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
 $version = $tauriConf.version
-$commit = & git rev-parse --short HEAD 2>&1
+$commit = Invoke-NativeCapture { & git rev-parse --short HEAD 2>&1 }
 Write-Ok "Version: $version"
 Write-Ok "Commit:  $commit"
 
@@ -121,11 +137,8 @@ if (-not $SkipTests) {
 
     Write-Host "  Frontend tests..."
     & pnpm --filter @memecho/desktop test
-    if ($LASTEXITCODE -ne 0) { Write-Warn "Some frontend tests failed (non-blocking for dev build)" }
-
-    Write-Host "  Rust tests..."
-    & cargo test --manifest-path (Join-Path $RepoRoot "apps\desktop\src-tauri\Cargo.toml") --locked 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { Write-Warn "Some Rust tests failed (non-blocking for dev build)" }
+    if ($LASTEXITCODE -ne 0) { Write-Fail "Frontend tests failed"; exit 1 }
+    Write-Ok "Frontend tests passed"
 } else {
     Write-Warn "Tests skipped (-SkipTests)"
 }
@@ -139,6 +152,15 @@ if (-not $SkipFrontend) {
     Write-Ok "Frontend built"
 } else {
     Write-Warn "Frontend build skipped (-SkipFrontend)"
+}
+
+# Rust tests embed the frontend dist (generate_context), so they must run after
+# the frontend build. Failures terminate the build.
+if (-not $SkipTests) {
+    Write-Step "Running Rust tests"
+    Invoke-NativeCapture { & cargo test --manifest-path (Join-Path $RepoRoot "apps\desktop\src-tauri\Cargo.toml") --locked 2>&1 }
+    if ($LASTEXITCODE -ne 0) { Write-Fail "Rust tests failed"; exit 1 }
+    Write-Ok "Rust tests passed"
 }
 
 Write-Step "Building MSI and NSIS installers"
@@ -179,7 +201,7 @@ foreach ($artifact in $artifacts) {
         signature_status = [string]$signature.Status
         version = $version
         commit = $commit
-        gateway_url = if ($env:VITE_GATEWAY_URL) { $env:VITE_GATEWAY_URL } else { "(runtime)" }
+        gateway_url = $env:VITE_GATEWAY_URL
         built_at = (Get-Date -Format "o")
     }
     Write-Host ""
