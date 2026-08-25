@@ -45,7 +45,7 @@
 
 ## Agent 成果归并结论
 
-2026-08-11 对 QoderCLI、Mimo、OpenCode 和集成 worktree 做了补丁等价性审计：
+2026-08-11 对本地 Agent 工具和集成 worktree 做了补丁等价性审计：
 
 - 音频捕获、实时字幕、Gateway 生产适配、文本导入、报告证据回听、历史会话、关系数据、发布门禁等成果均已由等价或更新实现进入 `integration/roadshow-v0`。
 - 连通性审计文档此前只存在于 Agent 分支，现已归入 `docs/v0.1.0/connectivity-audit.*`。
@@ -58,7 +58,7 @@
 - `.runtime/` 和历史 Agent 日志；日志可能含任务标识或脱敏前上下文。
 - `tmp/` 中的录音、分块、临时报告和本地会话。
 - `.test-tmp/`、缓存、虚拟环境、`node_modules/`、构建产物和 `*.tsbuildinfo`。
-- `.mimo/`、`.qoder/`、`memecho-agent-worktrees/` 等工具会话和工作副本。
+- `.qoder/`、`memecho-agent-worktrees/` 等工具会话和工作副本。
 
 这些目录可以按需重新生成。需要长期保留的结论应整理为 `docs/` 文档；需要长期保留的实现必须合并并提交到主线。
 
