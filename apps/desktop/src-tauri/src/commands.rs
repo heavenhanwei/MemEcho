@@ -670,6 +670,9 @@ pub fn poll_live_pcm(state: State<'_, AppState>) -> Result<String, String> {
     let guard = state.live.stream.lock();
     match guard.as_ref() {
         Some(stream) => {
+            if let Some(error) = stream.take_error() {
+                return Err(format!("live audio capture failed: {error}"));
+            }
             let bytes = stream.poll();
             if bytes.is_empty() {
                 Ok(String::new())

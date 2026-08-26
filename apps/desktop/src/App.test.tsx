@@ -292,6 +292,7 @@ describe("App (live resilience and Tauri desktop)", () => {
     expect(
       screen.getByText(/\u4e34\u65f6\u5b57\u5e55\u6b63\u5728\u91cd\u8fde/),
     ).toBeInTheDocument();
+    expect(screen.getByText("retry")).toBeInTheDocument();
   });
 
   it("uses native dual-track capture instead of MediaRecorder", async () => {

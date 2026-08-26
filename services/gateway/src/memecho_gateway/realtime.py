@@ -125,6 +125,7 @@ class BailianRealtimeClient:
                         "input_audio_format": "pcm",
                         "sample_rate": self.settings.bailian_realtime_sample_rate,
                         "input_audio_transcription": {
+                            "model": self.settings.bailian_realtime_model,
                             "language": self.settings.bailian_realtime_language
                         },
                         "turn_detection": {

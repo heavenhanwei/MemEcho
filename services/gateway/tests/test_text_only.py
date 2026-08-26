@@ -305,6 +305,61 @@ async def test_bailian_provider_repairs_missing_evidence_reference_once():
     )
 
 
+async def test_bailian_provider_does_not_discard_aligned_text_on_partial_track_failure():
+    request = {"request_id": "req_partial_track", "source": {"type": "audio"}}
+    session = {
+        "observations": {
+            "aligned_segments": [
+                {
+                    "segment_id": "seg_system_1",
+                    "speaker_id": "speaker_2",
+                    "start_ms": 0,
+                    "end_ms": 1000,
+                    "text": "系统轨存在可用文本。",
+                }
+            ],
+            "model_errors": [
+                {
+                    "source": "transcription",
+                    "error_code": "upstream_task_failed",
+                    "track": "microphone",
+                }
+            ],
+            "evidence_availability": {
+                "has_usable_text": True,
+                "aligned_segment_count": 1,
+                "transcript_segment_count": 1,
+                "successful_transcript_tracks": ["system"],
+                "failed_transcript_tracks": ["microphone"],
+            },
+        }
+    }
+    valid_result = await MockProvider().analyze(session, ["system"], request)
+    invalid_result = json.loads(json.dumps(valid_result))
+    invalid_result["analysis_mode"] = "insufficient"
+
+    class PartialFailureProvider(BailianProvider):
+        def __init__(self):
+            self.calls = []
+
+        async def _chat_completion(self, messages):
+            self.calls.append(messages)
+            return json.dumps(invalid_result if len(self.calls) == 1 else valid_result)
+
+    provider = PartialFailureProvider()
+    result = await provider.analyze(session, ["system"], request)
+
+    assert result["analysis_mode"] == "connected_full"
+    assert len(provider.calls) == 2
+    assert "model_errors 是限定到 track 的局部失败" in provider.calls[0][0]["content"]
+    repair_payload = json.loads(provider.calls[1][1]["content"])
+    assert any(
+        error["message"]
+        == "analysis_mode cannot be insufficient when aligned transcript evidence exists"
+        for error in repair_payload["validation_errors"]
+    )
+
+
 async def test_text_only_rejects_provider_acoustic_hallucination(tmp_path):
     memory_store = MemoryStore(tmp_path)
     session = await memory_store.create_session(

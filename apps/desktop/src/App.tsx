@@ -448,6 +448,7 @@ function NowPage() {
         type?: string;
         state?: string;
         text?: string;
+        message?: string;
         retryable?: boolean;
       };
       try {
@@ -459,6 +460,7 @@ function NowPage() {
         (event.type === "transcript.partial" || event.type === "transcript.final") &&
         event.text
       ) {
+        setMeterNote("");
         useAppStore.getState().patch({ caption: event.text });
       } else if (event.type === "connection.state") {
         if (event.state === "connected") setLiveStatus("connected");
@@ -470,6 +472,7 @@ function NowPage() {
         }
       } else if (event.type === "error") {
         allowReconnect = event.retryable !== false;
+        setMeterNote(event.message || "实时字幕服务返回错误");
         setLiveStatus(allowReconnect ? "reconnecting" : "offline");
         if (allowReconnect) scheduleLiveReconnect();
         ws.close();
@@ -531,8 +534,17 @@ function NowPage() {
             }
           }
         })
-        .catch(() => {
-          // Transient IPC error — skip this tick
+        .catch((cause) => {
+          nativeLiveActive.current = false;
+          if (nativeLiveTimer.current) {
+            window.clearInterval(nativeLiveTimer.current);
+            nativeLiveTimer.current = undefined;
+          }
+          setMeterNote(
+            `实时字幕音频采集已停止：${describeError(cause, "无法读取原生音频流")}（本地录音继续）`,
+          );
+          setLiveStatus("offline");
+          socket.current?.close();
         });
     };
     // Poll at ~50ms intervals (matches WASAPI 50ms buffer + 10ms poll sleep)

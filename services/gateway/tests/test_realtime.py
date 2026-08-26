@@ -82,6 +82,10 @@ async def test_client_forwards_pcm_and_maps_official_events():
     assert update["type"] == "session.update"
     assert update["session"]["input_audio_format"] == "pcm"
     assert update["session"]["sample_rate"] == 16000
+    assert (
+        update["session"]["input_audio_transcription"]["model"]
+        == "qwen3-asr-flash-realtime"
+    )
     assert update["session"]["turn_detection"]["type"] == "server_vad"
 
     pcm = b"\x01\x02" * 16000

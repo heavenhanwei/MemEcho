@@ -470,7 +470,13 @@ class Orchestrator:
                     diarization.extend(observation["diarization"])
                     emotions.extend(observation["emotions"])
                     transcription_segments.extend(observation["transcript"])
-                    model_errors.extend(observation["errors"])
+                    # Remote modules fail independently per track. Preserve that
+                    # scope so a silent microphone cannot invalidate usable text
+                    # recovered from the system-audio track.
+                    model_errors.extend(
+                        {**error, "track": upload.track}
+                        for error in observation["errors"]
+                    )
 
                 await self.store.update_job(job_id, JobStatus.aligning, 48, "对齐语言与声学证据")
                 if transcription_segments and (diarization or emotions):
@@ -498,6 +504,32 @@ class Orchestrator:
                         quality_metrics.append(metrics)
                 evidence_weights = conservative_evidence_weights(quality_metrics)
                 track_labels = [upload.track for upload in completed_uploads]
+                successful_transcript_tracks = sorted(
+                    {
+                        upload.track
+                        for upload in completed_uploads
+                        if observations_by_upload_id.get(upload.id, {}).get("transcript")
+                    }
+                )
+                failed_transcript_tracks = sorted(
+                    {
+                        upload.track
+                        for upload in completed_uploads
+                        if any(
+                            error.get("source") == "transcription"
+                            for error in observations_by_upload_id.get(upload.id, {}).get(
+                                "errors", []
+                            )
+                        )
+                    }
+                )
+                evidence_availability = {
+                    "has_usable_text": bool(aligned or transcription_segments),
+                    "aligned_segment_count": len(aligned),
+                    "transcript_segment_count": len(transcription_segments),
+                    "successful_transcript_tracks": successful_transcript_tracks,
+                    "failed_transcript_tracks": failed_transcript_tracks,
+                }
 
                 session.job_intermediates[job_id] = {
                     "aligned": aligned,
@@ -506,6 +538,7 @@ class Orchestrator:
                     "track_labels": track_labels,
                     "model_errors": model_errors,
                     "evidence_weights": evidence_weights,
+                    "evidence_availability": evidence_availability,
                 }
                 if hasattr(self.store, 'save_job_intermediate'):
                     self.store.save_job_intermediate(job_id, session.job_intermediates[job_id])
@@ -519,6 +552,13 @@ class Orchestrator:
                 track_labels = intermediate.get("track_labels", [Path(item).name for item in tracks])
                 model_errors = intermediate.get("model_errors", [])
                 evidence_weights = intermediate.get("evidence_weights") or conservative_evidence_weights(quality_metrics)
+                evidence_availability = intermediate.get("evidence_availability") or {
+                    "has_usable_text": bool(aligned),
+                    "aligned_segment_count": len(aligned),
+                    "transcript_segment_count": len(aligned),
+                    "successful_transcript_tracks": [],
+                    "failed_transcript_tracks": [],
+                }
                 processing_details.set_alignment(session, len(aligned))
 
             # Check participant resolution before analysis
@@ -542,6 +582,7 @@ class Orchestrator:
                         "acoustic_metrics": quality_metrics,
                         "model_errors": model_errors,
                         "evidence_weights": evidence_weights,
+                        "evidence_availability": evidence_availability,
                     },
                 },
                 tracks=track_labels,

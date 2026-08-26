@@ -193,6 +193,14 @@ async def test_filetrans_text_reaches_qwen_provider_input(tmp_path):
     aligned = provider.session_input["observations"]["aligned_segments"]
     assert [segment["text"] for segment in aligned] == CANONICAL_TEXTS
     assert session.result["_aligned_segments"] == aligned
+    availability = provider.session_input["observations"]["evidence_availability"]
+    assert availability == {
+        "has_usable_text": True,
+        "aligned_segment_count": len(CANONICAL_TEXTS),
+        "transcript_segment_count": len(CANONICAL_TEXTS),
+        "successful_transcript_tracks": ["mixed"],
+        "failed_transcript_tracks": [],
+    }
 
     details = processing_details.build_response(session)
     assert details.aligned_segment_count == len(CANONICAL_TEXTS)
@@ -231,7 +239,18 @@ async def test_filetrans_failure_reports_module_and_safe_code(tmp_path):
     # Alignment must not fabricate segments when FileTrans failed.
     assert provider.session_input["observations"]["aligned_segments"] == []
     errors = provider.session_input["observations"]["model_errors"]
-    assert {"source": "transcription", "error_code": "upstream_task_failed"} in errors
+    assert {
+        "source": "transcription",
+        "error_code": "upstream_task_failed",
+        "track": "mixed",
+    } in errors
+    assert provider.session_input["observations"]["evidence_availability"] == {
+        "has_usable_text": False,
+        "aligned_segment_count": 0,
+        "transcript_segment_count": 0,
+        "successful_transcript_tracks": [],
+        "failed_transcript_tracks": ["mixed"],
+    }
 
     details = processing_details.build_response(session)
     track = details.tracks[0]

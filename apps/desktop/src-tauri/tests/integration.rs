@@ -432,9 +432,13 @@ mod integration_tests {
 
         let create_upload_id = "upload-fixed-id-001".to_string();
 
-        // Mock create-upload: POST /v1/sessions/gw-sess/uploads
+        // Use the exact public Gateway ID shape (`ses_<hex>`) so the native
+        // validation contract is covered by an end-to-end upload test.
+        let gateway_session_id = "ses_0123456789abcdef";
+
+        // Mock create-upload: POST /v1/sessions/{id}/uploads
         Mock::given(method("POST"))
-            .and(path_regex(r"/v1/sessions/gw-sess/uploads$"))
+            .and(path_regex(r"/v1/sessions/ses_0123456789abcdef/uploads$"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "upload_id": create_upload_id,
                 "chunk_size": 4194304
@@ -445,7 +449,7 @@ mod integration_tests {
         // Mock chunk upload: PUT .../chunks/N
         Mock::given(method("PUT"))
             .and(path_regex(
-                r"/v1/sessions/gw-sess/uploads/upload-fixed-id-001/chunks/\d+",
+                r"/v1/sessions/ses_0123456789abcdef/uploads/upload-fixed-id-001/chunks/\d+",
             ))
             .respond_with(ResponseTemplate::new(200))
             .mount(&mock_server)
@@ -454,7 +458,7 @@ mod integration_tests {
         // Mock complete upload: POST .../complete — returns matching ID, size, sha
         Mock::given(method("POST"))
             .and(path_regex(
-                r"/v1/sessions/gw-sess/uploads/upload-fixed-id-001/complete",
+                r"/v1/sessions/ses_0123456789abcdef/uploads/upload-fixed-id-001/complete",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "upload_id": create_upload_id,
@@ -466,7 +470,7 @@ mod integration_tests {
 
         let result = memecho_desktop_lib::upload::upload_session_tracks_with_token(
             session_id,
-            "gw-sess".to_string(),
+            gateway_session_id.to_string(),
             mock_server.uri(),
             &sessions_dir,
             TEST_TOKEN.to_string(),

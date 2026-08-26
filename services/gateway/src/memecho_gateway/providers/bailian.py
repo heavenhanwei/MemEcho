@@ -15,7 +15,11 @@ SYSTEM_PROMPT = """你是 memEcho 对话分析服务。只分析可观察的表�
 严格输出 memEcho 1.1 JSON。事实主张只表示可核验类型，不表示已核实。明确行动必须是 discussed/confirmed，
 分析建议必须是 suggested/proposed。每项重要解释必须引用 evidence_refs、confidence 和 alternatives。
 VAD 表示情境中的表达状态，不表示真实内心。仅可使用输入中明确提供的语言和声学证据。
-每项 evidence 必须包含 track 字段，值为 "mic" 或 "system"，表示该证据来源于麦克风轨还是系统音频轨。"""
+每项 evidence 必须包含 track 字段，表示该证据来源的音频轨。
+model_errors 是限定到 track 的局部失败，不代表整场会话失败。必须优先检查
+session.observations.evidence_availability：当 has_usable_text=true 且存在 aligned_segments 时，
+必须分析这些可用文本，不得因为另一轨静音、超时或转写失败而声称“没有文本”“所有转写不可用”
+或将 analysis_mode 设为 insufficient。失败轨只能作为缺失信号和不确定性说明，不能否定成功轨证据。"""
 
 
 TEXT_ONLY_PROMPT = """TEXT-ONLY MODE: no audio or acoustic observation is available.
@@ -140,6 +144,12 @@ class BailianProvider:
             else None
         )
         contract_errors = validate_result(result, text_segments=text_segments)
+        observations = session.get("observations", {})
+        has_aligned_text = bool(observations.get("aligned_segments"))
+        if has_aligned_text and result.get("analysis_mode") == "insufficient":
+            contract_errors.append(
+                "analysis_mode cannot be insufficient when aligned transcript evidence exists"
+            )
         if not contract_errors:
             return result
         errors = [
@@ -182,6 +192,8 @@ class BailianProvider:
         )
         result = self._extract_json(repaired)
         self._enforce_conservative_recommendations(result)
+        if has_aligned_text and result.get("analysis_mode") == "insufficient":
+            raise ValueError("upstream analysis ignored usable aligned transcript evidence")
         return result
 
     async def chat(self, question: str, context: dict[str, Any], **kwargs) -> str:

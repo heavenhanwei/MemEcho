@@ -92,9 +92,16 @@ fn validate_id(id: &str) -> Result<(), UploadError> {
     Ok(())
 }
 
-/// Validate a gateway session ID (same rules).
+/// Validate a gateway session ID.
+///
+/// Gateway-generated IDs use the `ses_<hex>` form, so underscores are part
+/// of the public API contract even though local capture IDs are UUID-like.
 fn validate_gateway_id(id: &str) -> Result<(), UploadError> {
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(UploadError::InvalidGatewaySessionId);
     }
     Ok(())
@@ -475,6 +482,7 @@ mod tests {
     #[test]
     fn test_validate_gateway_id() {
         assert!(validate_gateway_id("gw-123").is_ok());
+        assert!(validate_gateway_id("ses_0123456789abcdef").is_ok());
         assert!(validate_gateway_id("").is_err());
         assert!(validate_gateway_id("../evil").is_err());
     }

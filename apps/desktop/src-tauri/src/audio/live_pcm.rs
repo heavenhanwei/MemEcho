@@ -72,6 +72,7 @@ impl Resampler {
 /// A thread-safe buffer that the WASAPI capture thread pushes PCM into
 /// and the Tauri command thread polls from.
 type SharedBuffer = Arc<Mutex<Vec<u8>>>;
+type SharedError = Arc<Mutex<Option<String>>>;
 
 /// Running live stream handle. Dropping this signals the threads to stop
 /// but does NOT join them — call `stop()` for a clean shutdown.
@@ -80,6 +81,7 @@ pub struct LiveStream {
     pause_flag: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     buffer: SharedBuffer,
+    error: SharedError,
 }
 
 impl LiveStream {
@@ -93,6 +95,11 @@ impl LiveStream {
     pub fn poll(&self) -> Vec<u8> {
         let mut buf = self.buffer.lock();
         std::mem::take(&mut *buf)
+    }
+
+    /// Return a capture-thread failure once so the frontend can surface it.
+    pub fn take_error(&self) -> Option<String> {
+        self.error.lock().take()
     }
 
     /// Signal stop, join the capture thread, return any remaining bytes.
@@ -163,10 +170,12 @@ pub mod wasapi_live {
     ) -> Result<LiveStream, String> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let buffer: SharedBuffer = Arc::new(Mutex::new(Vec::new()));
+        let error: SharedError = Arc::new(Mutex::new(None));
 
         let stop = stop_flag.clone();
         let pause_flag = pause.clone();
         let buf = buffer.clone();
+        let capture_error = error.clone();
         let src = source.to_string();
         let mic_id = mic_device_id.map(|s| s.to_string());
         let ren_id = render_device_id.map(|s| s.to_string());
@@ -178,6 +187,7 @@ pub mod wasapi_live {
                     live_capture_loop(&src, mic_id.as_deref(), ren_id.as_deref(), stop, pause, buf)
                 {
                     eprintln!("[live_pcm] capture error: {e}");
+                    *capture_error.lock() = Some(e);
                 }
             })
             .map_err(|e| format!("failed to spawn live-pcm thread: {e}"))?;
@@ -187,6 +197,7 @@ pub mod wasapi_live {
             pause_flag,
             handle: Some(handle),
             buffer,
+            error,
         })
     }
 
@@ -569,6 +580,7 @@ pub mod mock_live {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let pause_flag = pause.clone();
         let buffer: SharedBuffer = Arc::new(Mutex::new(Vec::new()));
+        let error: SharedError = Arc::new(Mutex::new(None));
         let stop = stop_flag.clone();
         let buf = buffer.clone();
         let src = source.to_string();
@@ -592,6 +604,7 @@ pub mod mock_live {
             pause_flag,
             handle: Some(handle),
             buffer,
+            error,
         })
     }
 }
@@ -631,6 +644,7 @@ mod tests {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let pause_flag = Arc::new(AtomicBool::new(false));
         let buffer: SharedBuffer = Arc::new(Mutex::new(Vec::new()));
+        let error: SharedError = Arc::new(Mutex::new(None));
         let stop = stop_flag.clone();
         let pause = pause_flag.clone();
         let buf = buffer.clone();
@@ -649,6 +663,7 @@ mod tests {
             pause_flag,
             handle: Some(handle),
             buffer,
+            error,
         }
     }
 

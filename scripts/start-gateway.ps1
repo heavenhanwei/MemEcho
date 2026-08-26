@@ -131,7 +131,10 @@ if (-not $ready) {
 
 # Wait for the gateway process; print exit message when it stops
 try {
-    Receive-Job $gatewayJob -Wait
+    # Uvicorn writes normal lifecycle messages to stderr. PowerShell surfaces
+    # those records as non-terminating errors, so do not let the script-wide
+    # Stop preference tear down an otherwise healthy background job.
+    Receive-Job $gatewayJob -Wait -ErrorAction Continue
 } finally {
     Remove-Job $gatewayJob -Force -ErrorAction SilentlyContinue
     Write-Host ""
