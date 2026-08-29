@@ -36,14 +36,35 @@ export const gatewayBaseUrl = _url;
 // ── Initialization ──────────────────────────────────────────────────────────
 
 /**
- * Load gateway URL from the Tauri bridge (gateway.json) and token from
- * Windows Credential Manager. Safe to call multiple times; first call wins.
- * Returns the resolved URL for immediate use.
+ * Resolve the gateway connection at startup.
+ *
+ * Preference order:
+ * 1. Supervisor runtime connection (managed sidecar on a random loopback
+ *    port with a one-time token, or an attached external dev gateway).
+ * 2. Explicit remote gateway setting: gateway.json URL + access token from
+ *    Windows Credential Manager.
+ *
+ * Safe to call multiple times; first call wins. Returns the resolved URL.
  */
 export async function initGatewayConfig(): Promise<string> {
   if (_initialized) return _url;
   if (isTauriRuntime()) {
     const { bridge } = await import("./tauri");
+    try {
+      const runtime = await bridge.gatewayConnection();
+      if (runtime?.url) {
+        _url = runtime.url;
+        if (runtime.token) {
+          // Sidecar one-time token: memory-only, used for Authorization
+          // headers — never embedded in a URL.
+          _token = runtime.token;
+          _initialized = true;
+          return _url;
+        }
+      }
+    } catch {
+      // Supervisor not active; fall through to explicit settings.
+    }
     try {
       const savedUrl = await bridge.getGatewayUrl();
       _url = savedUrl || BUILD_TIME_URL || DEFAULT_URL;

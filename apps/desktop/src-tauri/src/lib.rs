@@ -4,6 +4,7 @@ pub mod credential;
 pub mod db;
 pub mod evidence;
 pub mod gateway_check;
+pub mod gateway_supervisor;
 pub mod importer;
 pub mod llm_config;
 mod paths;
@@ -17,6 +18,7 @@ use audio::LiveStreamState;
 use parking_lot::Mutex;
 use state::CaptureState;
 use std::sync::Arc;
+use tauri::Manager;
 
 pub struct AppState {
     pub capture: Arc<Mutex<CaptureState>>,
@@ -24,6 +26,7 @@ pub struct AppState {
     pub live: Arc<LiveStreamState>,
     pub sessions_dir: std::path::PathBuf,
     pub db: db::Repository,
+    pub gateway: Arc<tokio::sync::Mutex<gateway_supervisor::GatewaySupervisor>>,
 }
 
 pub fn run() {
@@ -31,7 +34,11 @@ pub fn run() {
     let db_path = sessions_dir.join("memecho.db");
     let db = db::Repository::open(&db_path).expect("failed to open local database");
 
-    tauri::Builder::default()
+    let gateway = Arc::new(tokio::sync::Mutex::new(
+        gateway_supervisor::GatewaySupervisor::new(),
+    ));
+
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             capture: Arc::new(Mutex::new(CaptureState::new())),
@@ -39,6 +46,25 @@ pub fn run() {
             live: Arc::new(LiveStreamState::new()),
             sessions_dir,
             db,
+            gateway: gateway.clone(),
+        })
+        .setup({
+            let gateway = gateway.clone();
+            move |_app| {
+                tauri::async_runtime::block_on(async move {
+                    let mut supervisor = gateway.lock().await;
+                    if let Some(program) = gateway_supervisor::resolve_sidecar_binary() {
+                        let config = gateway_supervisor::SupervisorConfig::for_sidecar(program);
+                        if let Err(error) = supervisor.start_sidecar(&config).await {
+                            eprintln!("gateway sidecar failed to start: {}", error);
+                        }
+                    }
+                    // No bundled sidecar yet (packaging blocker): keep dev /
+                    // external mode — the frontend uses the explicit gateway
+                    // URL setting as before.
+                });
+                Ok(())
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_audio_devices,
@@ -67,6 +93,8 @@ pub fn run() {
             commands::check_gateway,
             commands::set_gateway_url,
             commands::get_gateway_url,
+            commands::gateway_connection,
+            commands::start_gateway_sidecar,
             commands::get_llm_config,
             commands::set_llm_config_file,
             commands::start_live_stream,
@@ -75,6 +103,15 @@ pub fn run() {
             commands::poll_live_pcm,
             commands::stop_live_stream,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running memEcho");
+        .build(tauri::generate_context!())
+        .expect("error while building memEcho");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            let state = app_handle.state::<AppState>();
+            tauri::async_runtime::block_on(async move {
+                state.gateway.lock().await.shutdown().await;
+            });
+        }
+    });
 }

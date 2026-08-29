@@ -573,6 +573,35 @@ pub fn get_gateway_url(state: State<'_, AppState>) -> Option<String> {
     crate::gateway_check::load_saved_gateway_url(&state.sessions_dir)
 }
 
+/// Current gateway runtime connection info prepared by the supervisor
+/// (managed sidecar or external dev gateway), or null when no runtime is
+/// active. The one-time token travels only over local IPC — never in a URL.
+#[tauri::command]
+pub async fn gateway_connection(
+    state: State<'_, AppState>,
+) -> Result<Option<crate::gateway_supervisor::GatewayConnectionInfo>, String> {
+    Ok(state.gateway.lock().await.connection())
+}
+
+/// Explicitly (re)start the bundled gateway sidecar on a random loopback
+/// port. Fails with a stable error while no sidecar binary is bundled.
+#[tauri::command]
+pub async fn start_gateway_sidecar(
+    state: State<'_, AppState>,
+) -> Result<crate::gateway_supervisor::GatewayConnectionInfo, String> {
+    let program = crate::gateway_supervisor::resolve_sidecar_binary().ok_or_else(|| {
+        "gateway sidecar binary is not bundled with this build yet".to_string()
+    })?;
+    let config = crate::gateway_supervisor::SupervisorConfig::for_sidecar(program);
+    state
+        .gateway
+        .lock()
+        .await
+        .start_sidecar(&config)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 // --- LLM config ---
 
 /// Load user LLM configuration (endpoints, model names, workspace ID).
