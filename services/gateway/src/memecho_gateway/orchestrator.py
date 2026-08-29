@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import media_cleanup, processing_details
+from . import media, media_cleanup, persistence, processing_details
 from .alignment import align_intervals
 from .contracts import validate_result
 from .models import FileTransPhase, JobStatus, ProcessingStage
-from .providers.oss import make_oss_key
 from .quality import compute_quality_metrics, conservative_evidence_weights
 from .rendering import render_html, render_markdown
 from .text_only import (
@@ -35,6 +36,19 @@ def _contract_error(errors: list[str]) -> AnalysisContractError:
     if len(errors) > 12:
         detail += f"; and {len(errors) - 12} more validation errors"
     return AnalysisContractError(detail[:2000])
+
+
+def _accepts_param(func: Any, name: str) -> bool:
+    """True when ``func`` declares ``name`` (or swallows arbitrary kwargs)."""
+    try:
+        parameters = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters:
+        return True
+    return any(
+        param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+    )
 
 
 @dataclass
@@ -87,6 +101,13 @@ class Orchestrator:
         self.dashscope = dashscope_client
         self.transcription = transcription_downloader
         self.media_retention_seconds = media_retention_seconds
+        # Object storage is one optional transport among four; the pipeline
+        # picks a transport from provider-declared media inputs instead.
+        # Prefix resolution is deferred to prepare() so text-only jobs never
+        # touch the OSS client.
+        self.transports: list[media.MediaTransport] = media.default_transports(
+            self.oss
+        )
 
     async def _invoke_module(
         self,
@@ -121,22 +142,119 @@ class Orchestrator:
             )
         return value, None, elapsed_ms
 
-    async def _download_transcription_with_phase(
+    FILETRANS_CAPABILITY = "file_transcription"
+
+    def _save_upstream_submission(
         self,
-        audio_url: str,
+        job_id: str | None,
         session: Any | None,
         upload_id: str | None,
-    ) -> dict[str, Any]:
-        """Download transcription with real-time phase tracking."""
-        has_tracking = (
-            session is not None
-            and upload_id is not None
-            and hasattr(self.transcription, "download_with_phase")
+        task_id: str,
+        media_input: str,
+    ) -> None:
+        """Persist the upstream task reference immediately after submission.
+
+        Persisting before any polling means a restart at any point can resume
+        the same billable task instead of submitting a duplicate.
+        """
+        if not job_id or upload_id is None or not hasattr(self.store, "save_upstream_task"):
+            return
+        self.store.save_upstream_task(
+            {
+                "job_id": job_id,
+                "capability": self.FILETRANS_CAPABILITY,
+                "upload_id": upload_id,
+                "session_id": session.id if session is not None else "",
+                "provider": getattr(self.transcription, "provider_id", "unknown"),
+                "media_input": media_input,
+                "upstream_task_id": task_id,
+                "status": persistence.UPSTREAM_STATUS_SUBMITTED,
+                "poll_count": 0,
+                "next_poll_at": None,
+                "last_error_code": None,
+            }
         )
-        if not has_tracking:
-            return await self.transcription.download(audio_url)
+
+    def _persist_upstream_phase(
+        self,
+        job_id: str | None,
+        upload_id: str | None,
+        phase_name: str,
+        kwargs: dict[str, Any],
+    ) -> None:
+        """Mirror FileTrans phase transitions onto the persisted task row."""
+        if not job_id or upload_id is None or not hasattr(self.store, "update_upstream_task"):
+            return
+        fields: dict[str, Any] = {}
+        if phase_name == "queued":
+            fields["status"] = persistence.UPSTREAM_STATUS_SUBMITTED
+        elif phase_name == "polling":
+            fields["status"] = persistence.UPSTREAM_STATUS_POLLING
+            if kwargs.get("poll_attempts") is not None:
+                fields["poll_count"] = int(kwargs["poll_attempts"])
+            if kwargs.get("next_poll_after_ms") is not None:
+                fields["next_poll_at"] = (
+                    datetime.now(UTC)
+                    + timedelta(milliseconds=int(kwargs["next_poll_after_ms"]))
+                ).isoformat()
+        elif phase_name == "downloading":
+            fields["status"] = persistence.UPSTREAM_STATUS_DOWNLOADING
+        elif phase_name == "timed_out":
+            # Timeout keeps the upstream reference resumable: the task may
+            # still be running upstream, so it must never be resubmitted.
+            fields["status"] = persistence.UPSTREAM_STATUS_TIMEOUT
+            fields["last_error_code"] = "upstream_timeout"
+        elif phase_name == "failed":
+            fields["status"] = persistence.UPSTREAM_STATUS_FAILED
+            fields["last_error_code"] = kwargs.get("error_code") or "upstream_task_failed"
+        elif phase_name == "succeeded":
+            fields["status"] = persistence.UPSTREAM_STATUS_COMPLETED
+        if fields:
+            self.store.update_upstream_task(
+                job_id, self.FILETRANS_CAPABILITY, upload_id, fields
+            )
+
+    async def _download_transcription_with_phase(
+        self,
+        prepared: media.PreparedMedia,
+        session: Any | None,
+        upload_id: str | None,
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Run FileTrans through the selected transport with phase tracking.
+
+        A persisted upstream task reference (from a previous attempt or a
+        gateway restart) is resumed — polling continues against the same
+        task id and nothing billable is resubmitted.
+        """
+        existing = None
+        if job_id is not None and upload_id is not None and hasattr(
+            self.store, "get_upstream_task"
+        ):
+            existing = self.store.get_upstream_task(
+                job_id, self.FILETRANS_CAPABILITY, upload_id
+            )
+        resumable = (
+            existing is not None
+            and bool(existing.get("upstream_task_id"))
+            and existing.get("status") in persistence.UPSTREAM_RESUMABLE_STATUSES
+            and hasattr(self.transcription, "resume_with_phase")
+        )
+        # Resumed polling continues the persisted attempt counter.
+        poll_offset = int(existing.get("poll_count", 0)) if resumable else 0
+        tracking = session is not None and upload_id is not None
 
         def on_phase(phase_name: str, **kwargs: Any) -> None:
+            raw_task_id = kwargs.pop("task_id", None)
+            if raw_task_id:
+                self._save_upstream_submission(
+                    job_id, session, upload_id, raw_task_id, prepared.input_type.value
+                )
+            if phase_name == "polling" and kwargs.get("poll_attempts") is not None:
+                kwargs["poll_attempts"] = int(kwargs["poll_attempts"]) + poll_offset
+            self._persist_upstream_phase(job_id, upload_id, phase_name, kwargs)
+            if not tracking:
+                return
             try:
                 phase = FileTransPhase(phase_name)
             except ValueError:
@@ -157,26 +275,78 @@ class Orchestrator:
                     audio_duration_ms=audio_duration_ms,
                 )
                 # The transcript segments will be added by the caller
-                # after download_with_phase returns.
+                # after the download returns.
 
-        return await self.transcription.download_with_phase(
-            audio_url, on_phase=on_phase,
-        )
+        on_submitted = None
+        if job_id is not None and upload_id is not None and hasattr(
+            self.store, "save_upstream_task"
+        ):
+            def on_submitted(task_id: str) -> None:
+                self._save_upstream_submission(
+                    job_id, session, upload_id, task_id, prepared.input_type.value
+                )
+
+        if resumable:
+            log.info(
+                "FileTrans resuming persisted upstream task job_id=%s status=%s",
+                job_id,
+                existing.get("status"),
+            )
+            resume_kwargs: dict[str, Any] = {}
+            if _accepts_param(self.transcription.resume_with_phase, "on_phase"):
+                resume_kwargs["on_phase"] = on_phase
+            return await self.transcription.resume_with_phase(
+                existing["upstream_task_id"], **resume_kwargs
+            )
+
+        if prepared.input_type != media.MediaInput.public_url:
+            if not hasattr(self.transcription, "download_with_media"):
+                raise media.MediaInputUnsupportedError(
+                    getattr(self.transcription, "provider_id", "transcription"),
+                    self.FILETRANS_CAPABILITY,
+                    (prepared.input_type,),
+                    tuple(transport.capability for transport in self.transports),
+                )
+            media_kwargs: dict[str, Any] = {"on_phase": on_phase}
+            if _accepts_param(self.transcription.download_with_media, "on_submitted"):
+                media_kwargs["on_submitted"] = on_submitted
+            return await self.transcription.download_with_media(prepared, **media_kwargs)
+
+        if hasattr(self.transcription, "download_with_phase"):
+            phase_kwargs: dict[str, Any] = {"on_phase": on_phase}
+            if _accepts_param(self.transcription.download_with_phase, "on_submitted"):
+                phase_kwargs["on_submitted"] = on_submitted
+            return await self.transcription.download_with_phase(
+                prepared.url, **phase_kwargs
+            )
+        return await self.transcription.download(prepared.url)
 
     async def _collect_remote_observations(
         self,
-        audio_url: str,
+        prepared: media.PreparedMedia | str,
         session: Any | None = None,
         upload_id: str | None = None,
+        job_id: str | None = None,
         audio_kwargs: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        if isinstance(prepared, str):
+            prepared = media.PreparedMedia(
+                input_type=media.MediaInput.public_url,
+                transport_id="public_url",
+                url=prepared,
+            )
         calls: dict[str, Any] = {}
-        if self.dashscope:
+        audio_url = (
+            prepared.url
+            if prepared.input_type == media.MediaInput.public_url
+            else None
+        )
+        if self.dashscope and audio_url:
             calls["fun_asr"] = self.dashscope.submit_fun_asr(audio_url, **(audio_kwargs or {}))
             calls["emotion"] = self.dashscope.submit_emotion(audio_url, **(audio_kwargs or {}))
         if self.transcription:
             calls["transcription"] = self._download_transcription_with_phase(
-                audio_url, session, upload_id,
+                prepared, session, upload_id, job_id,
             )
         if not calls:
             return {
@@ -387,7 +557,7 @@ class Orchestrator:
     async def run(self, job_id: str, session_id: str, request: dict[str, Any], overrides: ProviderOverrides | None = None) -> None:
         session = self.store.sessions[session_id]
         request = session.analysis_requests.get(job_id, request)
-        oss_keys: list[str] = []
+        prepared_cleanup: list[tuple[media.MediaTransport, media.PreparedMedia]] = []
         text_kwargs = overrides.text_kwargs if overrides else {}
         audio_kw = overrides.audio_kwargs if overrides else {}
         try:
@@ -410,32 +580,121 @@ class Orchestrator:
                 transcription_segments: list[dict[str, Any]] = []
                 model_errors: list[dict[str, str]] = []
 
-                remote_tracks: list[tuple[Any, Path, str]] = []
-                if self.oss and completed_uploads:
-                    prefix = getattr(
-                        getattr(self.oss, "settings", None),
-                        "oss_prefix",
-                        "memecho-tmp",
+                remote_tracks: list[tuple[Any, Path, media.PreparedMedia]] = []
+                transport: media.MediaTransport | None = None
+                if completed_uploads:
+                    available_caps = tuple(
+                        item.capability for item in self.transports
                     )
+                    # Legacy clients that declare no media inputs keep the
+                    # historical preference: object storage first when it is
+                    # configured, direct transports otherwise.
+                    preferred = (
+                        media.MediaInput.public_url,
+                        media.MediaInput.binary_upload,
+                        media.MediaInput.local_path,
+                        media.MediaInput.base64_inline,
+                    )
+                    fallback = tuple(
+                        item for item in preferred if item in available_caps
+                    )
+                    if self.transcription or self.dashscope:
+                        accepted = media.compatible_media_inputs(
+                            [self.transcription, self.dashscope], fallback
+                        )
+                        if not accepted:
+                            declared = tuple(
+                                dict.fromkeys(
+                                    item
+                                    for client in (self.transcription, self.dashscope)
+                                    if client is not None
+                                    for item in media.accepted_media_inputs(
+                                        client, fallback
+                                    )
+                                )
+                            )
+                            for upload in completed_uploads:
+                                for module in processing_details.REMOTE_MODULES:
+                                    processing_details.set_module(
+                                        session,
+                                        upload.id,
+                                        module,
+                                        ProcessingStage.failed,
+                                        error_code="media_input_unsupported",
+                                    )
+                                processing_details.set_oss(
+                                    session, upload.id, ProcessingStage.skipped
+                                )
+                            raise media.MediaInputUnsupportedError(
+                                "audio-pipeline",
+                                Orchestrator.FILETRANS_CAPABILITY,
+                                declared,
+                                available_caps,
+                            )
+                    else:
+                        accepted = fallback
+                    transport = media.select_transport(accepted, self.transports)
+                    if transport is None:
+                        # Declared inputs exist but no transport can satisfy
+                        # them (e.g. public_url required without object
+                        # storage). Surface this loudly; skipping would fake
+                        # a successful analysis with no evidence.
+                        for upload in completed_uploads:
+                            for module in processing_details.REMOTE_MODULES:
+                                processing_details.set_module(
+                                    session,
+                                    upload.id,
+                                    module,
+                                    ProcessingStage.failed,
+                                    error_code="media_input_unsupported",
+                                )
+                            processing_details.set_oss(
+                                session, upload.id, ProcessingStage.skipped
+                            )
+                        raise media.MediaInputUnsupportedError(
+                            "audio-pipeline",
+                            Orchestrator.FILETRANS_CAPABILITY,
+                            tuple(accepted),
+                            available_caps,
+                        )
+
+                if transport is not None:
                     for upload in completed_uploads:
                         path = Path(upload.completed_path)
-                        oss_key = make_oss_key(prefix, session_id, upload.id, path.name)
-                        oss_keys.append(oss_key)
-                        processing_details.set_oss(
-                            session, upload.id, ProcessingStage.running
+                        is_url_transport = (
+                            transport.capability == media.MediaInput.public_url
                         )
-                        try:
-                            await self.oss.upload_file(oss_key, path, upload.mime_type)
-                            audio_url = await self.oss.signed_url(oss_key)
-                        except Exception:
+                        if is_url_transport:
                             processing_details.set_oss(
-                                session, upload.id, ProcessingStage.failed
+                                session, upload.id, ProcessingStage.running
                             )
+                        try:
+                            prepared = await transport.prepare(
+                                media.MediaRequest(
+                                    session_id=session_id,
+                                    upload_id=upload.id,
+                                    path=path,
+                                    file_name=path.name,
+                                    mime_type=upload.mime_type,
+                                    size_bytes=path.stat().st_size,
+                                )
+                            )
+                        except Exception:
+                            if is_url_transport:
+                                processing_details.set_oss(
+                                    session, upload.id, ProcessingStage.failed
+                                )
                             raise
-                        processing_details.set_oss(
-                            session, upload.id, ProcessingStage.succeeded
-                        )
-                        remote_tracks.append((upload, path, audio_url))
+                        if is_url_transport:
+                            processing_details.set_oss(
+                                session, upload.id, ProcessingStage.succeeded
+                            )
+                        else:
+                            processing_details.set_oss(
+                                session, upload.id, ProcessingStage.skipped
+                            )
+                        prepared_cleanup.append((transport, prepared))
+                        remote_tracks.append((upload, path, prepared))
 
                 if not remote_tracks:
                     skipped = list(processing_details.REMOTE_MODULES)
@@ -445,7 +704,11 @@ class Orchestrator:
                         )
                 else:
                     missing: list[str] = []
-                    if not self.dashscope:
+                    url_transport = (
+                        transport is not None
+                        and transport.capability == media.MediaInput.public_url
+                    )
+                    if not (self.dashscope and url_transport):
                         missing.extend(["fun_asr", "emotion"])
                     if not self.transcription:
                         missing.append("transcription")
@@ -458,6 +721,7 @@ class Orchestrator:
                     *(
                         self._collect_remote_observations(
                             item[2], session=session, upload_id=item[0].id,
+                            job_id=job_id,
                             audio_kwargs=audio_kw if audio_kw else None,
                         )
                         for item in remote_tracks
@@ -640,23 +904,31 @@ class Orchestrator:
                     ProcessingStage.failed,
                     processing_details.safe_error_code(exc),
                 )
+            error_code = (
+                exc.error_code
+                if isinstance(exc, media.MediaInputUnsupportedError)
+                else type(exc).__name__
+            )
             await self.store.update_job(
                 job_id,
                 JobStatus.failed,
                 current_progress,
                 "分析失败",
                 retryable=True,
-                error_code=type(exc).__name__,
+                error_code=error_code,
                 error_detail=error_detail,
             )
         finally:
             session.resume_scheduled_jobs.discard(job_id)
-            if self.oss and oss_keys:
-                for key in oss_keys:
-                    try:
-                        await self.oss.delete(key)
-                    except Exception:
-                        log.warning("OSS cleanup failed for key=%s", key, exc_info=True)
+            for cleanup_transport, prepared in prepared_cleanup:
+                try:
+                    await cleanup_transport.cleanup(prepared)
+                except Exception:
+                    log.warning(
+                        "Media transport cleanup failed transport=%s",
+                        cleanup_transport.transport_id,
+                        exc_info=True,
+                    )
             try:
                 media_cleanup.remove_session_media(
                     self.store, session_id, self.media_retention_seconds

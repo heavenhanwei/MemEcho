@@ -18,7 +18,7 @@ from .models import JobStatus
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -91,11 +91,43 @@ CREATE TABLE IF NOT EXISTS resume_scheduled_jobs (
     PRIMARY KEY (session_id, job_id)
 );
 
+CREATE TABLE IF NOT EXISTS upstream_tasks (
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    capability TEXT NOT NULL,
+    upload_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    media_input TEXT NOT NULL,
+    upstream_task_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    poll_count INTEGER NOT NULL DEFAULT 0,
+    next_poll_at TEXT,
+    last_error_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (job_id, capability, upload_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_uploads_session ON uploads(session_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_idempotency_job ON idempotency(job_id);
+CREATE INDEX IF NOT EXISTS idx_upstream_tasks_status ON upstream_tasks(status);
 """
+
+# Async upstream task lifecycle states. ``submitted``/``polling``/``timeout``
+# all reference a live upstream task: after a restart the gateway resumes
+# polling the same upstream task id instead of resubmitting a billable task.
+UPSTREAM_STATUS_SUBMITTED = "submitted"
+UPSTREAM_STATUS_POLLING = "polling"
+UPSTREAM_STATUS_DOWNLOADING = "downloading"
+UPSTREAM_STATUS_COMPLETED = "completed"
+UPSTREAM_STATUS_FAILED = "failed"
+UPSTREAM_STATUS_TIMEOUT = "timeout"
+
+UPSTREAM_RESUMABLE_STATUSES = frozenset(
+    {UPSTREAM_STATUS_SUBMITTED, UPSTREAM_STATUS_POLLING, UPSTREAM_STATUS_TIMEOUT}
+)
 
 
 @contextmanager
@@ -493,3 +525,100 @@ def get_unfinished_jobs(db_path: Path) -> list[dict[str, Any]]:
                 "stage_label": row["stage_label"],
             })
     return jobs
+
+
+def save_upstream_task(db_path: Path, record: dict[str, Any]) -> None:
+    """Upsert an async upstream task reference keyed by job/capability/upload."""
+    now = _now_iso()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO upstream_tasks
+               (job_id, capability, upload_id, session_id, provider, media_input,
+                upstream_task_id, status, poll_count, next_poll_at, last_error_code,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(job_id, capability, upload_id) DO UPDATE SET
+                   session_id = excluded.session_id,
+                   provider = excluded.provider,
+                   media_input = excluded.media_input,
+                   upstream_task_id = excluded.upstream_task_id,
+                   status = excluded.status,
+                   poll_count = excluded.poll_count,
+                   next_poll_at = excluded.next_poll_at,
+                   last_error_code = excluded.last_error_code,
+                   updated_at = excluded.updated_at""",
+            (
+                record["job_id"],
+                record["capability"],
+                record["upload_id"],
+                record["session_id"],
+                record["provider"],
+                record["media_input"],
+                record["upstream_task_id"],
+                record["status"],
+                int(record.get("poll_count", 0)),
+                record.get("next_poll_at"),
+                record.get("last_error_code"),
+                record.get("created_at") or now,
+                now,
+            ),
+        )
+
+
+_UPSTREAM_MUTABLE_FIELDS = (
+    "upstream_task_id",
+    "status",
+    "poll_count",
+    "next_poll_at",
+    "last_error_code",
+)
+
+
+def update_upstream_task(
+    db_path: Path,
+    job_id: str,
+    capability: str,
+    upload_id: str,
+    fields: dict[str, Any],
+) -> None:
+    """Apply a partial update to an upstream task reference."""
+    assignments = [
+        f"{name} = ?" for name in fields if name in _UPSTREAM_MUTABLE_FIELDS
+    ]
+    if not assignments:
+        return
+    assignments.append("updated_at = ?")
+    values = [
+        fields[name] for name in fields if name in _UPSTREAM_MUTABLE_FIELDS
+    ]
+    values.append(_now_iso())
+    values.extend([job_id, capability, upload_id])
+    with _connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE upstream_tasks SET {', '.join(assignments)} "
+            "WHERE job_id = ? AND capability = ? AND upload_id = ?",
+            values,
+        )
+
+
+def _upstream_task_row(row: Any) -> dict[str, Any]:
+    return {
+        "job_id": row["job_id"],
+        "capability": row["capability"],
+        "upload_id": row["upload_id"],
+        "session_id": row["session_id"],
+        "provider": row["provider"],
+        "media_input": row["media_input"],
+        "upstream_task_id": row["upstream_task_id"],
+        "status": row["status"],
+        "poll_count": int(row["poll_count"]),
+        "next_poll_at": row["next_poll_at"],
+        "last_error_code": row["last_error_code"],
+    }
+
+
+def load_all_upstream_tasks(db_path: Path) -> list[dict[str, Any]]:
+    """Load every persisted upstream task reference."""
+    with _connect(db_path) as conn:
+        rows = conn.execute("SELECT * FROM upstream_tasks").fetchall()
+        return [_upstream_task_row(row) for row in rows]
