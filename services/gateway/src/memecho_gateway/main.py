@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -27,12 +28,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from . import __version__, media_cleanup, processing_details
+from . import profiles as profile_registry
 from .config import Settings, get_settings
+from .credentials import build_default_credential_resolver
 from .models import (
     AnalysisRequest,
     AnalysisResult,
     ArtifactMetadata,
     ArtifactsResponse,
+    CapabilitiesResponse,
     ChatRequest,
     Health,
     JobStatus,
@@ -42,6 +46,12 @@ from .models import (
     ParticipantsCandidatesResponse,
     ProcessingDetailsResponse,
     ProcessingStage,
+    ProfileVerification,
+    ProviderCapability,
+    ProviderProfileCreate,
+    ProviderProfileList,
+    ProviderProfileUpdate,
+    ProviderProfileView,
     SessionCreate,
     SessionCreated,
     UploadComplete,
@@ -115,6 +125,7 @@ orchestrator = Orchestrator(
     media_retention_seconds=settings.memecho_media_retention_seconds,
 )
 realtime_client_factory = BailianRealtimeClient
+credential_resolver = build_default_credential_resolver()
 
 
 log = logging.getLogger(__name__)
@@ -165,7 +176,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type",
         "X-LLM-Text-Api-Key", "X-LLM-Text-Endpoint", "X-LLM-Text-Model",
         "X-LLM-Audio-Api-Key", "X-LLM-Audio-Endpoint", "X-LLM-Workspace-Id",
@@ -202,6 +213,43 @@ def resolve_audio_settings(request: Request) -> dict:
         "base_url": getattr(request.state, "llm_audio_endpoint", "") or settings.bailian_audio_base_url,
         "workspace_id": getattr(request.state, "llm_workspace_id", "") or settings.bailian_workspace_id,
     }
+
+
+def resolve_session_runtime(session) -> tuple[ProviderOverrides | None, object | None]:
+    """Resolve provider overrides/adapter for a session.
+
+    A session bound to a Provider Profile always resolves from that profile —
+    it never falls back to the global env key, so realtime captions and the
+    formal report share one account. Unbound sessions keep the compatibility
+    path (X-LLM headers resolved by the caller, then env defaults).
+    """
+    profile_id = session.create.provider_profile_id
+    if not profile_id:
+        return None, None
+    profile = store.profiles.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=409, detail="profile_not_found")
+    if profile.provider == "mock":
+        return (
+            ProviderOverrides(profile_id=profile_id, supports_audio=False),
+            profile_registry.select_provider("mock", settings),
+        )
+    try:
+        api_key = profile_registry.resolve_profile_secret(profile, credential_resolver)
+    except profile_registry.ProfileCredentialError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    resolved = profile_registry.build_profile_overrides(profile, api_key, settings)
+    overrides = ProviderOverrides(
+        text_api_key=resolved["text_kwargs"].get("api_key", ""),
+        text_endpoint=resolved["text_kwargs"].get("base_url", ""),
+        text_model=resolved["text_kwargs"].get("model", ""),
+        audio_api_key=resolved["audio_kwargs"].get("api_key", ""),
+        audio_endpoint=resolved["audio_kwargs"].get("base_url", ""),
+        workspace_id=resolved["audio_kwargs"].get("workspace_id", ""),
+        profile_id=profile_id,
+        supports_audio=resolved["supports_audio"],
+    )
+    return overrides, profile_registry.select_provider(profile.provider, settings)
 
 
 def require_token(
@@ -268,15 +316,136 @@ async def test_llm_connection(request: Request, payload: LlmTestRequest) -> LlmT
     return LlmTestResponse(ok=False, error=f"未知的 kind: {payload.kind}")
 
 
+@app.get(
+    "/v1/capabilities",
+    response_model=CapabilitiesResponse,
+    dependencies=[Depends(require_token)],
+)
+async def get_capabilities() -> CapabilitiesResponse:
+    """Gateway and provider capability manifests."""
+    return CapabilitiesResponse(
+        provider=settings.memecho_provider,
+        provider_kinds=list(profile_registry.PROVIDER_MANIFESTS.values()),
+    )
+
+
+@app.get(
+    "/v1/provider-profiles",
+    response_model=ProviderProfileList,
+    dependencies=[Depends(require_token)],
+)
+async def list_provider_profiles() -> ProviderProfileList:
+    return ProviderProfileList(
+        profiles=sorted(store.profiles.values(), key=lambda item: item.created_at)
+    )
+
+
+@app.post(
+    "/v1/provider-profiles",
+    response_model=ProviderProfileView,
+    status_code=201,
+    dependencies=[Depends(require_token)],
+)
+async def create_provider_profile(payload: ProviderProfileCreate) -> ProviderProfileView:
+    now = datetime.now(UTC)
+    view = ProviderProfileView(
+        id=f"prof_{uuid4().hex[:16]}",
+        name=payload.name,
+        provider=payload.provider,
+        credential_ref=payload.credential_ref,
+        text_base_url=payload.text_base_url,
+        text_model=payload.text_model,
+        audio_base_url=payload.audio_base_url,
+        realtime_ws_url=payload.realtime_ws_url,
+        realtime_model=payload.realtime_model,
+        workspace_id=payload.workspace_id,
+        capabilities=profile_registry.capabilities_for(payload.provider),
+        created_at=now,
+        updated_at=now,
+    )
+    store.save_profile(view)
+    log.info(
+        "Provider profile created profile_id=%s provider=%s",
+        view.id,
+        view.provider,
+    )
+    return view
+
+
+@app.get(
+    "/v1/provider-profiles/{profile_id}",
+    response_model=ProviderProfileView,
+    dependencies=[Depends(require_token)],
+)
+async def get_provider_profile(profile_id: str) -> ProviderProfileView:
+    profile = store.profiles.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="profile not found")
+    return profile
+
+
+@app.patch(
+    "/v1/provider-profiles/{profile_id}",
+    response_model=ProviderProfileView,
+    dependencies=[Depends(require_token)],
+)
+async def update_provider_profile(
+    profile_id: str, payload: ProviderProfileUpdate
+) -> ProviderProfileView:
+    existing = store.profiles.get(profile_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="profile not found")
+    data = existing.model_dump()
+    data.update(payload.model_dump(exclude_unset=True))
+    data["updated_at"] = datetime.now(UTC)
+    data["capabilities"] = profile_registry.capabilities_for(existing.provider)
+    view = ProviderProfileView(**data)
+    store.save_profile(view)
+    log.info("Provider profile updated profile_id=%s", profile_id)
+    return view
+
+
+@app.delete(
+    "/v1/provider-profiles/{profile_id}",
+    dependencies=[Depends(require_token)],
+)
+async def delete_provider_profile(profile_id: str) -> dict[str, bool]:
+    if profile_id not in store.profiles:
+        raise HTTPException(status_code=404, detail="profile not found")
+    if store.sessions_using_profile(profile_id) > 0:
+        raise HTTPException(status_code=409, detail="profile_in_use")
+    store.delete_profile(profile_id)
+    log.info("Provider profile deleted profile_id=%s", profile_id)
+    return {"ok": True}
+
+
+@app.post(
+    "/v1/provider-profiles/{profile_id}/verify",
+    response_model=ProfileVerification,
+    dependencies=[Depends(require_token)],
+)
+async def verify_provider_profile(profile_id: str) -> ProfileVerification:
+    """Bill-free credential and capability probe with stable error codes."""
+    profile = store.profiles.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="profile not found")
+    return await profile_registry.verify_profile(profile, credential_resolver, settings)
+
+
 @app.post(
     "/v1/sessions",
     response_model=SessionCreated,
     dependencies=[Depends(require_token)],
 )
 async def create_session(payload: SessionCreate) -> SessionCreated:
+    if payload.provider_profile_id and payload.provider_profile_id not in store.profiles:
+        raise HTTPException(status_code=404, detail="provider profile not found")
     record = await store.create_session(payload)
     return SessionCreated(
-        id=record.id, request_id=record.request_id, status="queued"
+        id=record.id,
+        request_id=record.request_id,
+        status="queued",
+        provider_profile_id=payload.provider_profile_id,
     )
 
 
@@ -419,7 +588,10 @@ async def complete_upload(
     dependencies=[Depends(require_token)],
 )
 async def resolve_participants(
-    session_id: str, payload: ParticipantResolution, background: BackgroundTasks
+    session_id: str,
+    payload: ParticipantResolution,
+    background: BackgroundTasks,
+    request: Request,
 ) -> dict[str, bool]:
     session = store.sessions.get(session_id)
     if not session:
@@ -432,10 +604,27 @@ async def resolve_participants(
         original_request = session.analysis_requests.get(job.id)
         if original_request is None:
             raise HTTPException(status_code=409, detail="analysis request is unavailable")
+        # The resumed job keeps the session's Profile binding; unbound
+        # sessions keep the X-LLM header compatibility path.
+        overrides, chosen_provider = resolve_session_runtime(session)
+        if overrides is None:
+            overrides = ProviderOverrides(
+                text_api_key=getattr(request.state, "llm_text_api_key", ""),
+                text_endpoint=getattr(request.state, "llm_text_endpoint", ""),
+                text_model=getattr(request.state, "llm_text_model", ""),
+                audio_api_key=getattr(request.state, "llm_audio_api_key", ""),
+                audio_endpoint=getattr(request.state, "llm_audio_endpoint", ""),
+                workspace_id=getattr(request.state, "llm_workspace_id", ""),
+            )
         session.resume_scheduled_jobs.add(job.id)
         store.save_resume_scheduled_job(session_id, job.id)
         background.add_task(
-            orchestrator.run, job.id, session_id, original_request.copy()
+            orchestrator.run,
+            job.id,
+            session_id,
+            original_request.copy(),
+            overrides,
+            chosen_provider,
         )
 
     return {"ok": True}
@@ -497,14 +686,20 @@ async def analyze(
             status_code=422,
             detail="text source cannot be combined with media uploads",
         )
-    overrides = ProviderOverrides(
-        text_api_key=getattr(request.state, "llm_text_api_key", ""),
-        text_endpoint=getattr(request.state, "llm_text_endpoint", ""),
-        text_model=getattr(request.state, "llm_text_model", ""),
-        audio_api_key=getattr(request.state, "llm_audio_api_key", ""),
-        audio_endpoint=getattr(request.state, "llm_audio_endpoint", ""),
-        workspace_id=getattr(request.state, "llm_workspace_id", ""),
-    )
+    profile_overrides, profile_provider = resolve_session_runtime(session)
+    if profile_overrides is not None:
+        overrides = profile_overrides
+        chosen_provider = profile_provider
+    else:
+        overrides = ProviderOverrides(
+            text_api_key=getattr(request.state, "llm_text_api_key", ""),
+            text_endpoint=getattr(request.state, "llm_text_endpoint", ""),
+            text_model=getattr(request.state, "llm_text_model", ""),
+            audio_api_key=getattr(request.state, "llm_audio_api_key", ""),
+            audio_endpoint=getattr(request.state, "llm_audio_endpoint", ""),
+            workspace_id=getattr(request.state, "llm_workspace_id", ""),
+        )
+        chosen_provider = None
     job = await store.create_job(session_id, payload.request_id)
     original_request = store.sessions[session_id].analysis_requests.setdefault(
         job.id, payload.model_dump()
@@ -512,7 +707,12 @@ async def analyze(
     store.save_analysis_request(job.id, original_request)
     if job.status == JobStatus.queued:
         background.add_task(
-            orchestrator.run, job.id, session_id, original_request.copy(), overrides
+            orchestrator.run,
+            job.id,
+            session_id,
+            original_request.copy(),
+            overrides,
+            chosen_provider,
         )
     return job
 
@@ -662,8 +862,44 @@ async def live_transcript(websocket: WebSocket, session_id: str, token: str):
         await websocket.close(code=4401)
         return
     await websocket.accept()
-    if settings.memecho_provider == "bailian":
-        await _bailian_live_transcript(websocket)
+    session = store.sessions[session_id]
+    profile = (
+        store.profiles.get(session.create.provider_profile_id)
+        if session.create.provider_profile_id
+        else None
+    )
+    if profile is not None:
+        if not profile_registry.kind_supports(
+            profile.provider, ProviderCapability.realtime_asr
+        ):
+            await _send_live_failure(
+                websocket,
+                code="realtime_configuration_error",
+                message="Profile does not support realtime ASR.",
+                retryable=False,
+            )
+            return
+        if profile.provider == "bailian":
+            try:
+                api_key = profile_registry.resolve_profile_secret(
+                    profile, credential_resolver
+                )
+            except profile_registry.ProfileCredentialError:
+                await _send_live_failure(
+                    websocket,
+                    code="realtime_configuration_error",
+                    message="credential_unresolved",
+                    retryable=False,
+                )
+                return
+            realtime_settings = profile_registry.realtime_settings_for(
+                profile, api_key, settings
+            )
+            await _bailian_live_transcript(websocket, realtime_settings)
+            return
+        # mock profile: fall through to the mock caption loop below.
+    elif settings.memecho_provider == "bailian":
+        await _bailian_live_transcript(websocket, settings)
         return
     await websocket.send_json({"type": "connection.state", "state": "connected"})
     bytes_seen = 0
@@ -705,8 +941,10 @@ async def _send_live_failure(
     await websocket.send_json({"type": "connection.state", "state": "offline"})
 
 
-async def _bailian_live_transcript(websocket: WebSocket) -> None:
-    client = realtime_client_factory(settings)
+async def _bailian_live_transcript(
+    websocket: WebSocket, realtime_settings: Settings | None = None
+) -> None:
+    client = realtime_client_factory(realtime_settings or settings)
     desktop_task: asyncio.Task | None = None
     upstream_task: asyncio.Task | None = None
     try:

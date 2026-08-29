@@ -314,6 +314,120 @@ export interface GatewaySession {
   id: string;
   request_id: string;
   status: JobStatus;
+  provider_profile_id?: string | null;
+}
+
+// ── Provider profiles (BYOK) ────────────────────────────────────────────────
+
+export type ProviderKind = "bailian" | "openai_compatible" | "mock";
+
+export type ProviderCapability =
+  | "realtime_asr"
+  | "file_transcription"
+  | "diarization"
+  | "audio_emotion"
+  | "text_analysis";
+
+/** Non-sensitive profile fields only — API keys never travel through this type. */
+export interface ProviderProfileInput {
+  name?: string;
+  provider?: ProviderKind;
+  credential_ref?: string | null;
+  text_base_url?: string;
+  text_model?: string;
+  audio_base_url?: string;
+  realtime_ws_url?: string;
+  realtime_model?: string;
+  workspace_id?: string;
+}
+
+export interface ProviderProfile {
+  id: string;
+  name: string;
+  provider: ProviderKind;
+  credential_ref: string | null;
+  text_base_url: string;
+  text_model: string;
+  audio_base_url: string;
+  realtime_ws_url: string;
+  realtime_model: string;
+  workspace_id: string;
+  capabilities: ProviderCapability[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CapabilityProbe {
+  capability: ProviderCapability;
+  status: "ok" | "failed" | "unavailable";
+  error_code: string | null;
+}
+
+export interface ProfileVerification {
+  profile_id: string;
+  ok: boolean;
+  error_code: string | null;
+  capabilities: CapabilityProbe[];
+}
+
+export interface ProviderKindManifest {
+  id: ProviderKind;
+  display_name: string;
+  capabilities: ProviderCapability[];
+  auth_fields: string[];
+  media_inputs: string[];
+}
+
+export interface CapabilitiesResponse {
+  provider: string;
+  provider_kinds: ProviderKindManifest[];
+}
+
+export function profileCredentialName(profileId: string): string {
+  return `profile:${profileId}:api_key`;
+}
+
+/**
+ * Store a profile API key in the OS credential store (native keeps secret
+ * ownership) and return the credential_ref the gateway should use.
+ */
+export async function saveProfileApiKey(profileId: string, apiKey: string): Promise<string> {
+  const target = profileCredentialName(profileId);
+  if (isTauriRuntime()) {
+    const { bridge } = await import("./tauri");
+    await bridge.credentialSet(target, apiKey);
+  }
+  return `wincred:memecho:${target}`;
+}
+
+export async function deleteProfileApiKey(profileId: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const { bridge } = await import("./tauri");
+  try {
+    await bridge.credentialDelete(profileCredentialName(profileId));
+  } catch {
+    /* credential already absent */
+  }
+}
+
+const ACTIVE_PROFILE_STORAGE_KEY = "memecho.activeProviderProfileId";
+
+/** Profile bound to newly created sessions. Empty means gateway defaults. */
+export function getActiveProviderProfileId(): string {
+  try {
+    return localStorage.getItem(ACTIVE_PROFILE_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function setActiveProviderProfileId(profileId: string): void {
+  try {
+    if (profileId) localStorage.setItem(ACTIVE_PROFILE_STORAGE_KEY, profileId);
+    else localStorage.removeItem(ACTIVE_PROFILE_STORAGE_KEY);
+  } catch {
+    /* storage unavailable */
+  }
 }
 
 export interface GatewayJob {
@@ -435,7 +549,7 @@ async function jobEvents(
 
 export const gateway = {
   health: () => request<{ status: string; provider: string }>("/v1/health"),
-  createSession: (title: string, sourceMode: string) =>
+  createSession: (title: string, sourceMode: string, providerProfileId?: string) =>
     request<GatewaySession>("/v1/sessions", {
       method: "POST",
       body: JSON.stringify({
@@ -444,6 +558,7 @@ export const gateway = {
         occurred_at: new Date().toISOString(),
         source_mode: sourceMode,
         marks: [],
+        ...(providerProfileId ? { provider_profile_id: providerProfileId } : {}),
       }),
     }),
   uploadBlob: async (
@@ -561,6 +676,29 @@ export const gateway = {
       body: JSON.stringify({ kind }),
     });
   },
+  capabilities: () => request<CapabilitiesResponse>("/v1/capabilities"),
+  listProfiles: () =>
+    request<{ profiles: ProviderProfile[] }>("/v1/provider-profiles").then(
+      (response) => response.profiles,
+    ),
+  createProfile: (input: ProviderProfileInput) =>
+    request<ProviderProfile>("/v1/provider-profiles", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateProfile: (profileId: string, patch: ProviderProfileInput) =>
+    request<ProviderProfile>(`/v1/provider-profiles/${id(profileId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  deleteProfile: (profileId: string) =>
+    request<{ ok: boolean }>(`/v1/provider-profiles/${id(profileId)}`, {
+      method: "DELETE",
+    }),
+  verifyProfile: (profileId: string) =>
+    request<ProfileVerification>(`/v1/provider-profiles/${id(profileId)}/verify`, {
+      method: "POST",
+    }),
   liveUrl: (sessionId: string) => {
     const base = _url;
     const wsBase = base.replace(/^http/, "ws");

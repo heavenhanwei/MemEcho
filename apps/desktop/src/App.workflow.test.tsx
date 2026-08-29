@@ -24,6 +24,19 @@ vi.mock("./lib/api", () => ({
   setGatewayUrl: vi.fn().mockResolvedValue(undefined),
   setGatewayToken: vi.fn().mockResolvedValue(undefined),
   initGatewayConfig: vi.fn().mockResolvedValue("https://gateway.example"),
+  GatewayApiError: class GatewayApiError extends Error {
+    constructor(
+      public readonly status: number,
+      detail: string,
+    ) {
+      super(detail);
+      this.name = "GatewayApiError";
+    }
+  },
+  getActiveProviderProfileId: () => "",
+  setActiveProviderProfileId: vi.fn(),
+  saveProfileApiKey: vi.fn().mockResolvedValue("wincred:memecho:profile:prof_1:api_key"),
+  deleteProfileApiKey: vi.fn().mockResolvedValue(undefined),
   gateway: {
     createSession: vi.fn(),
     uploadBlob: vi.fn().mockResolvedValue({
@@ -60,6 +73,12 @@ vi.mock("./lib/api", () => ({
     }),
     chat: vi.fn(),
     health: vi.fn().mockResolvedValue({ status: "ok", provider: "mock" }),
+    testLlmConnection: vi.fn().mockResolvedValue({ ok: true }),
+    listProfiles: vi.fn().mockResolvedValue([]),
+    createProfile: vi.fn(),
+    updateProfile: vi.fn(),
+    deleteProfile: vi.fn(),
+    verifyProfile: vi.fn(),
   },
 }));
 

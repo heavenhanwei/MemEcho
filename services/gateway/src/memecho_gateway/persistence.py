@@ -18,7 +18,7 @@ from .models import JobStatus
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     occurred_at TEXT NOT NULL,
     source_mode TEXT NOT NULL,
     marks TEXT NOT NULL DEFAULT '[]',
+    provider_profile_id TEXT,
     participant_resolution TEXT,
     result TEXT,
     processing TEXT NOT NULL DEFAULT '{}',
@@ -91,10 +92,21 @@ CREATE TABLE IF NOT EXISTS resume_scheduled_jobs (
     PRIMARY KEY (session_id, job_id)
 );
 
+CREATE TABLE IF NOT EXISTS provider_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    credential_ref TEXT,
+    config TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_uploads_session ON uploads(session_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_idempotency_job ON idempotency(job_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(provider_profile_id);
 """
 
 
@@ -122,7 +134,15 @@ def init_db(db_path: Path) -> None:
         if row is None:
             conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         elif row["version"] < SCHEMA_VERSION:
-            # Future: add migration logic here
+            if row["version"] < 2:
+                columns = {
+                    column["name"]
+                    for column in conn.execute("PRAGMA table_info(sessions)")
+                }
+                if "provider_profile_id" not in columns:
+                    conn.execute(
+                        "ALTER TABLE sessions ADD COLUMN provider_profile_id TEXT"
+                    )
             conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
 
 
@@ -144,14 +164,15 @@ def save_session(
     with _connect(db_path) as conn:
         conn.execute(
             """INSERT INTO sessions
-               (id, request_id, title, context, occurred_at, source_mode, marks, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               (id, request_id, title, context, occurred_at, source_mode, marks, provider_profile_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title,
                    context = excluded.context,
                    occurred_at = excluded.occurred_at,
                    source_mode = excluded.source_mode,
                    marks = excluded.marks,
+                   provider_profile_id = excluded.provider_profile_id,
                    updated_at = excluded.updated_at""",
             (
                 session_id,
@@ -161,6 +182,7 @@ def save_session(
                 create_data["occurred_at"].isoformat() if isinstance(create_data["occurred_at"], datetime) else create_data["occurred_at"],
                 create_data["source_mode"],
                 json.dumps(create_data.get("marks", []), ensure_ascii=False),
+                create_data.get("provider_profile_id"),
                 _now_iso(),
                 _now_iso(),
             ),
@@ -377,6 +399,7 @@ def load_all_sessions(db_path: Path) -> dict[str, dict[str, Any]]:
                 "occurred_at": row["occurred_at"],
                 "source_mode": row["source_mode"],
                 "marks": _loads_or(row["marks"], []),
+                "provider_profile_id": row["provider_profile_id"],
                 "participant_resolution": _loads_or(row["participant_resolution"], None),
                 "result": _loads_or(row["result"], None),
                 "processing": _loads_or(row["processing"], {}),
@@ -493,3 +516,75 @@ def get_unfinished_jobs(db_path: Path) -> list[dict[str, Any]]:
                 "stage_label": row["stage_label"],
             })
     return jobs
+
+
+# ── Provider profiles ────────────────────────────────────────────────────────
+# Only non-sensitive configuration is persisted. Secrets stay in the OS
+# credential store and are referenced by ``credential_ref`` alone.
+
+_PROFILE_CONFIG_FIELDS = (
+    "text_base_url",
+    "text_model",
+    "audio_base_url",
+    "realtime_ws_url",
+    "realtime_model",
+    "workspace_id",
+)
+
+
+def save_profile(db_path: Path, profile: dict[str, Any]) -> None:
+    """Insert or replace a provider profile row."""
+    config = {key: profile.get(key, "") for key in _PROFILE_CONFIG_FIELDS}
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO provider_profiles
+               (id, name, provider, credential_ref, config, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   name = excluded.name,
+                   provider = excluded.provider,
+                   credential_ref = excluded.credential_ref,
+                   config = excluded.config,
+                   updated_at = excluded.updated_at""",
+            (
+                profile["id"],
+                profile["name"],
+                profile["provider"],
+                profile.get("credential_ref"),
+                json.dumps(config, ensure_ascii=False),
+                profile["created_at"],
+                profile["updated_at"],
+            ),
+        )
+
+
+def delete_profile(db_path: Path, profile_id: str) -> None:
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM provider_profiles WHERE id = ?", (profile_id,))
+
+
+def load_all_profiles(db_path: Path) -> dict[str, dict[str, Any]]:
+    profiles: dict[str, dict[str, Any]] = {}
+    with _connect(db_path) as conn:
+        rows = conn.execute("SELECT * FROM provider_profiles").fetchall()
+        for row in rows:
+            config = _loads_or(row["config"], {})
+            profiles[row["id"]] = {
+                "id": row["id"],
+                "name": row["name"],
+                "provider": row["provider"],
+                "credential_ref": row["credential_ref"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                **{key: config.get(key, "") for key in _PROFILE_CONFIG_FIELDS},
+            }
+    return profiles
+
+
+def count_sessions_using_profile(db_path: Path, profile_id: str) -> int:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM sessions WHERE provider_profile_id = ?",
+            (profile_id,),
+        ).fetchone()
+        return int(row["n"]) if row else 0

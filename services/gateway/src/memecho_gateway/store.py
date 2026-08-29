@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .models import JobStatus, JobView, SessionCreate
+from .models import JobStatus, JobView, ProviderProfileView, SessionCreate
 from . import persistence
 
 log = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ class MemoryStore:
         self.jobs: dict[str, JobView] = {}
         self.events: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self.idempotency: dict[str, str] = {}
+        self.profiles: dict[str, ProviderProfileView] = {}
         self.lock = asyncio.Lock()
 
     async def create_session(self, payload: SessionCreate) -> SessionRecord:
@@ -136,6 +137,7 @@ class PersistentStore(MemoryStore):
                     occurred_at=data["occurred_at"],
                     source_mode=data["source_mode"],
                     marks=data["marks"],
+                    provider_profile_id=data.get("provider_profile_id"),
                 )
                 record = SessionRecord(
                     id=session_id,
@@ -225,6 +227,23 @@ class PersistentStore(MemoryStore):
         for session_id, job_ids in resume_jobs.items():
             if session_id in self.sessions:
                 self.sessions[session_id].resume_scheduled_jobs = job_ids
+
+        # Load provider profiles (non-sensitive config only)
+        from . import profiles as profile_registry
+
+        for profile_id, profile_data in persistence.load_all_profiles(
+            self.db_path
+        ).items():
+            try:
+                self.profiles[profile_id] = profile_registry.build_profile_view(
+                    profile_id, profile_data
+                )
+            except Exception:
+                log.warning(
+                    "Skipping unparsable persisted profile %s",
+                    profile_id,
+                    exc_info=True,
+                )
 
         log.info(
             "Loaded %d sessions, %d jobs from persistence",
@@ -372,4 +391,39 @@ class PersistentStore(MemoryStore):
                     if mapped != job_id
                 }
         persistence.delete_session(self.db_path, session_id)
+
+    # ── Provider profile registry ───────────────────────────────────────────
+
+    def sessions_using_profile(self, profile_id: str) -> int:
+        """Count persisted sessions bound to a profile."""
+        return persistence.count_sessions_using_profile(self.db_path, profile_id)
+
+    def save_profile(self, profile: ProviderProfileView) -> None:
+        """Persist a profile (non-sensitive fields only) and refresh memory."""
+        self.profiles[profile.id] = profile
+        persistence.save_profile(
+            self.db_path,
+            {
+                "id": profile.id,
+                "name": profile.name,
+                "provider": profile.provider,
+                "credential_ref": profile.credential_ref,
+                "text_base_url": profile.text_base_url,
+                "text_model": profile.text_model,
+                "audio_base_url": profile.audio_base_url,
+                "realtime_ws_url": profile.realtime_ws_url,
+                "realtime_model": profile.realtime_model,
+                "workspace_id": profile.workspace_id,
+                "created_at": profile.created_at.isoformat()
+                if isinstance(profile.created_at, datetime)
+                else profile.created_at,
+                "updated_at": profile.updated_at.isoformat()
+                if isinstance(profile.updated_at, datetime)
+                else profile.updated_at,
+            },
+        )
+
+    def delete_profile(self, profile_id: str) -> None:
+        self.profiles.pop(profile_id, None)
+        persistence.delete_profile(self.db_path, profile_id)
 
