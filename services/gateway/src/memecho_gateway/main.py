@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import __version__, media_cleanup, persistence, processing_details
+from . import __version__, media_cleanup, persistence, processing_details, profile_config
 from . import profiles as profile_registry
 from .config import Settings, get_settings
 from .credentials import build_default_credential_resolver
@@ -49,6 +49,7 @@ from .models import (
     ProfileVerification,
     ProviderCapability,
     ProviderProfileCreate,
+    ProviderProfileConfigStatus,
     ProviderProfileList,
     ProviderProfileUpdate,
     ProviderProfileView,
@@ -147,6 +148,26 @@ async def lifespan(_: FastAPI):
     settings.memecho_data_dir.mkdir(parents=True, exist_ok=True)
     # Initialize persistent store and load persisted state
     await store.initialize()
+    profile_path = profile_config.config_path(settings.memecho_data_dir)
+    try:
+        if profile_path.exists():
+            configured_profiles = profile_config.load(profile_path)
+            configured_ids = {profile.id for profile in configured_profiles}
+            for existing_id in list(store.profiles):
+                if existing_id not in configured_ids and store.sessions_using_profile(existing_id) == 0:
+                    store.delete_profile(existing_id)
+            for profile in configured_profiles:
+                store.save_profile(
+                    profile.model_copy(
+                        update={
+                            "capabilities": profile_registry.capabilities_for(profile.provider)
+                        }
+                    )
+                )
+        else:
+            profile_config.save(profile_path, list(store.profiles.values()))
+    except Exception:
+        log.exception("Failed to load editable provider profile configuration")
     # Recover interrupted jobs. Jobs holding a resumable upstream async task
     # reference continue polling the same upstream task id (a restart must
     # never resubmit a billable task); everything else is marked failed so it
@@ -412,12 +433,59 @@ async def create_provider_profile(payload: ProviderProfileCreate) -> ProviderPro
         updated_at=now,
     )
     store.save_profile(view)
+    profile_config.save(
+        profile_config.config_path(settings.memecho_data_dir),
+        list(store.profiles.values()),
+    )
     log.info(
         "Provider profile created profile_id=%s provider=%s",
         view.id,
         view.provider,
     )
     return view
+
+
+@app.get(
+    "/v1/provider-profiles/config",
+    response_model=ProviderProfileConfigStatus,
+    dependencies=[Depends(require_token)],
+)
+async def provider_profile_config_status() -> ProviderProfileConfigStatus:
+    path = profile_config.config_path(settings.memecho_data_dir)
+    if not path.exists():
+        profile_config.save(path, list(store.profiles.values()))
+    return ProviderProfileConfigStatus(path=str(path), profiles=len(store.profiles))
+
+
+@app.post(
+    "/v1/provider-profiles/config/reload",
+    response_model=ProviderProfileConfigStatus,
+    dependencies=[Depends(require_token)],
+)
+async def reload_provider_profile_config() -> ProviderProfileConfigStatus:
+    path = profile_config.config_path(settings.memecho_data_dir)
+    try:
+        configured_profiles = profile_config.load(path)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="provider_profile_config_invalid") from exc
+    configured_ids = {profile.id for profile in configured_profiles}
+    blocked = [
+        profile_id
+        for profile_id in store.profiles
+        if profile_id not in configured_ids and store.sessions_using_profile(profile_id) > 0
+    ]
+    if blocked:
+        raise HTTPException(status_code=409, detail="provider_profile_in_use")
+    for existing_id in list(store.profiles):
+        if existing_id not in configured_ids:
+            store.delete_profile(existing_id)
+    for profile in configured_profiles:
+        store.save_profile(
+            profile.model_copy(
+                update={"capabilities": profile_registry.capabilities_for(profile.provider)}
+            )
+        )
+    return ProviderProfileConfigStatus(path=str(path), profiles=len(store.profiles))
 
 
 @app.get(
@@ -449,6 +517,10 @@ async def update_provider_profile(
     data["capabilities"] = profile_registry.capabilities_for(existing.provider)
     view = ProviderProfileView(**data)
     store.save_profile(view)
+    profile_config.save(
+        profile_config.config_path(settings.memecho_data_dir),
+        list(store.profiles.values()),
+    )
     log.info("Provider profile updated profile_id=%s", profile_id)
     return view
 
@@ -463,6 +535,10 @@ async def delete_provider_profile(profile_id: str) -> dict[str, bool]:
     if store.sessions_using_profile(profile_id) > 0:
         raise HTTPException(status_code=409, detail="profile_in_use")
     store.delete_profile(profile_id)
+    profile_config.save(
+        profile_config.config_path(settings.memecho_data_dir),
+        list(store.profiles.values()),
+    )
     log.info("Provider profile deleted profile_id=%s", profile_id)
     return {"ok": True}
 

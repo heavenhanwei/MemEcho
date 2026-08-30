@@ -330,4 +330,20 @@ describe("bridge gateway runtime commands", () => {
     });
     await expect(bridge.startGatewaySidecar()).rejects.toThrow("not bundled");
   });
+
+  it("gets and opens the editable provider profile configuration", async () => {
+    const configPath = "C:\\Users\\demo\\provider_profiles.json";
+    const calls = installMock((cmd) => {
+      if (cmd === "get_provider_profiles_config_path") return configPath;
+      if (cmd === "open_provider_profiles_config") return null;
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    await expect(bridge.getProviderProfilesConfigPath()).resolves.toBe(configPath);
+    await expect(bridge.openProviderProfilesConfig()).resolves.toBeNull();
+    expect(calls.map((call) => call.cmd)).toEqual([
+      "get_provider_profiles_config_path",
+      "open_provider_profiles_config",
+    ]);
+  });
 });

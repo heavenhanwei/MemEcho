@@ -549,6 +549,18 @@ class ProviderProfileList(BaseModel):
     profiles: list[ProviderProfileView]
 
 
+class ProviderProfileConfigFile(BaseModel):
+    """User-editable non-secret provider configuration persisted as JSON."""
+
+    version: Literal[1] = 1
+    profiles: list[ProviderProfileView] = Field(default_factory=list)
+
+
+class ProviderProfileConfigStatus(BaseModel):
+    path: str
+    profiles: int
+
+
 class CapabilityProbe(BaseModel):
     capability: ProviderCapability
     status: Literal["ok", "failed", "unavailable"]

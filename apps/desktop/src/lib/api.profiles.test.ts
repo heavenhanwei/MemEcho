@@ -109,6 +109,23 @@ describe("provider profile APIs", () => {
     expect(fetchMock.mock.calls[2][0]).toContain("/v1/provider-profiles/prof%2F1");
     expect(fetchMock.mock.calls[2][1].method).toBe("DELETE");
   });
+
+  it("reports and reloads the editable profile configuration file", async () => {
+    const status = {
+      path: "C:\\Users\\demo\\AppData\\Roaming\\memEcho\\sessions\\gateway\\provider_profiles.json",
+      profiles: 1,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(responseJson(status))
+      .mockResolvedValueOnce(responseJson(status));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(gateway.profileConfigStatus()).resolves.toEqual(status);
+    await expect(gateway.reloadProfileConfig()).resolves.toEqual(status);
+    expect(fetchMock.mock.calls[0][0]).toContain("/v1/provider-profiles/config");
+    expect(fetchMock.mock.calls[1][0]).toContain("/v1/provider-profiles/config/reload");
+    expect(fetchMock.mock.calls[1][1].method).toBe("POST");
+  });
 });
 
 describe("active provider profile selection", () => {

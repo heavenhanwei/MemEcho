@@ -314,6 +314,12 @@ export const bridge = {
 
   startGatewaySidecar: () => invoke<GatewayConnectionInfo>("start_gateway_sidecar"),
 
+  getProviderProfilesConfigPath: () =>
+    invoke<string>("get_provider_profiles_config_path"),
+
+  openProviderProfilesConfig: () =>
+    invoke<void>("open_provider_profiles_config"),
+
   getLlmConfig: () => invoke<LlmConfig>("get_llm_config"),
 
   setLlmConfigFile: (config: LlmConfig) =>

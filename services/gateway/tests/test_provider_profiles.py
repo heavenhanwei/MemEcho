@@ -183,6 +183,46 @@ def test_update_and_delete_profile(client: TestClient, cleanup_profiles: list[st
     assert client.get(f"/v1/provider-profiles/{profile['id']}", headers=AUTH).status_code == 404
 
 
+def test_profile_config_file_is_editable_and_reloadable(
+    client: TestClient, cleanup_profiles: list[str]
+):
+    profile = make_profile(
+        client,
+        cleanup_profiles,
+        text_base_url="https://text.example/v1",
+        text_model="qwen-max",
+    )
+    status = client.get("/v1/provider-profiles/config", headers=AUTH)
+    assert status.status_code == 200
+    path = Path(status.json()["path"])
+    assert path == Path(main.settings.memecho_data_dir) / "provider_profiles.json"
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["version"] == 1
+    assert PROFILE_SECRET not in path.read_text(encoding="utf-8")
+    payload["profiles"][0]["name"] = "edited in json"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    reloaded = client.post("/v1/provider-profiles/config/reload", headers=AUTH)
+    assert reloaded.status_code == 200
+    assert reloaded.json()["profiles"] == 1
+    fetched = client.get(f"/v1/provider-profiles/{profile['id']}", headers=AUTH)
+    assert fetched.json()["name"] == "edited in json"
+
+
+def test_invalid_profile_config_file_is_rejected_without_losing_profiles(
+    client: TestClient, cleanup_profiles: list[str]
+):
+    profile = make_profile(client, cleanup_profiles)
+    path = Path(main.settings.memecho_data_dir) / "provider_profiles.json"
+    path.write_text('{"version": 1, "profiles": "invalid"}', encoding="utf-8")
+
+    response = client.post("/v1/provider-profiles/config/reload", headers=AUTH)
+    assert response.status_code == 422
+    assert response.json()["detail"] == "provider_profile_config_invalid"
+    assert profile["id"] in main.store.profiles
+
+
 def test_capabilities_endpoint_lists_manifests(client: TestClient):
     response = client.get("/v1/capabilities", headers=AUTH)
     assert response.status_code == 200

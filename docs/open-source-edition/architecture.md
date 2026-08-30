@@ -211,6 +211,14 @@ submitted → polling → downloading → parsing → completed
 
 创建 Session 时冻结本次使用的 Profile 快照，但不复制密钥。暂停、身份确认、重试和恢复都必须继续引用同一 Profile，避免实时字幕与会后分析使用不同账号。
 
+### 6.4 可编辑配置文件
+
+- 桌面 Sidecar 将非敏感 Profile 同步到 `%APPDATA%\memEcho\sessions\gateway\provider_profiles.json`。
+- 界面创建、更新和删除 Profile 时原子更新该文件；用户也可点击“打开配置文件”直接编辑。
+- 手工保存后点击“重新载入文件”完成结构校验并同步到 Gateway；无效 JSON 不覆盖当前有效配置。
+- 文件仅包含 Endpoint、模型、Workspace、能力和 `credential_ref`，不得包含 API Key 明文。
+- 删除仍被 Session 引用的 Profile 会被拒绝，避免破坏既有会话的可审计性。
+
 ## 7. API 与事件合同
 
 Pydantic/OpenAPI 是 HTTP 合同的唯一来源，桌面 TypeScript SDK 自动生成。建议核心接口：
@@ -220,6 +228,8 @@ Pydantic/OpenAPI 是 HTTP 合同的唯一来源，桌面 TypeScript SDK 自动�
 | `GET /v1/health` | 进程、版本和基础健康 |
 | `GET /v1/capabilities` | Gateway 与 Provider 能力 |
 | `GET/POST/PATCH /v1/provider-profiles` | Provider Profile 管理 |
+| `GET /v1/provider-profiles/config` | 可编辑配置文件位置和状态 |
+| `POST /v1/provider-profiles/config/reload` | 校验并重新载入配置文件 |
 | `POST /v1/provider-profiles/{id}/verify` | 鉴权和能力探测 |
 | `POST /v1/sessions` | 创建会话并绑定 Profile |
 | `WS /v1/sessions/{id}/live` | 二进制 PCM 与实时字幕事件 |
@@ -394,4 +404,3 @@ memecho-desktop/
 | 后台任务 | SQLite 持久化、幂等、可恢复 |
 | 插件策略 | 先内置 Adapter，后开放受限 SDK |
 | 历史版本 | `docs/v0.1.0/` 保留为路演版实现记录 |
-

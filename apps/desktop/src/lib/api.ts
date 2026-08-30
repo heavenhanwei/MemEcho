@@ -380,6 +380,11 @@ export interface ProviderProfile {
   updated_at: string;
 }
 
+export interface ProviderProfileConfigStatus {
+  path: string;
+  profiles: number;
+}
+
 export interface CapabilityProbe {
   capability: ProviderCapability;
   status: "ok" | "failed" | "unavailable";
@@ -704,6 +709,12 @@ export const gateway = {
     request<{ profiles: ProviderProfile[] }>("/v1/provider-profiles").then(
       (response) => response.profiles,
     ),
+  profileConfigStatus: () =>
+    request<ProviderProfileConfigStatus>("/v1/provider-profiles/config"),
+  reloadProfileConfig: () =>
+    request<ProviderProfileConfigStatus>("/v1/provider-profiles/config/reload", {
+      method: "POST",
+    }),
   createProfile: (input: ProviderProfileInput) =>
     request<ProviderProfile>("/v1/provider-profiles", {
       method: "POST",

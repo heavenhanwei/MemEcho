@@ -603,6 +603,42 @@ pub async fn start_gateway_sidecar(
         .map_err(|error| error.to_string())
 }
 
+/// Return the editable, non-secret Provider Profile configuration path.
+#[tauri::command]
+pub fn get_provider_profiles_config_path(state: State<'_, AppState>) -> String {
+    state
+        .sessions_dir
+        .join("gateway")
+        .join("provider_profiles.json")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Open the exact Provider Profile configuration file in the Windows editor.
+#[tauri::command]
+pub fn open_provider_profiles_config(state: State<'_, AppState>) -> Result<(), String> {
+    let path = state
+        .sessions_dir
+        .join("gateway")
+        .join("provider_profiles.json");
+    if !path.is_file() {
+        return Err("provider profile configuration has not been created yet".to_string());
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("notepad.exe")
+            .arg(&path)
+            .spawn()
+            .map_err(|error| format!("open provider profile config: {}", error))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err("opening the configuration editor is supported on Windows only".to_string())
+    }
+}
+
 // --- LLM config ---
 
 /// Load user LLM configuration (endpoints, model names, workspace ID).

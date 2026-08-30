@@ -98,6 +98,8 @@ pub fn run() {
             commands::get_gateway_url,
             commands::gateway_connection,
             commands::start_gateway_sidecar,
+            commands::get_provider_profiles_config_path,
+            commands::open_provider_profiles_config,
             commands::get_llm_config,
             commands::set_llm_config_file,
             commands::start_live_stream,

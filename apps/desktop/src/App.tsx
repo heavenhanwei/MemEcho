@@ -1856,12 +1856,21 @@ function ProviderProfilesSection() {
   const [notice, setNotice] = useState("");
   const [verifyingId, setVerifyingId] = useState("");
   const [verifications, setVerifications] = useState<Record<string, ProfileVerification>>({});
+  const [configPath, setConfigPath] = useState("");
 
   const refresh = useCallback(async () => {
     try {
       setProfiles(await gateway.listProfiles());
     } catch {
       setProfiles([]);
+    }
+    try {
+      const status = await gateway.profileConfigStatus();
+      setConfigPath(status.path);
+    } catch {
+      if (isTauriRuntime()) {
+        setConfigPath(await bridge.getProviderProfilesConfigPath().catch(() => ""));
+      }
     }
   }, []);
 
@@ -1939,6 +1948,29 @@ function ProviderProfilesSection() {
     }
   }, [activeId, refresh]);
 
+  const reloadConfigFile = useCallback(async () => {
+    setError("");
+    setNotice("");
+    try {
+      const status = await gateway.reloadProfileConfig();
+      setConfigPath(status.path);
+      await refresh();
+      setNotice(`已从配置文件重新载入 ${status.profiles} 项配置。`);
+    } catch (cause) {
+      setError(describeError(cause, "重新载入配置文件失败"));
+    }
+  }, [refresh]);
+
+  const openConfigFile = useCallback(async () => {
+    setError("");
+    try {
+      await bridge.openProviderProfilesConfig();
+      setNotice("已打开配置文件；修改并保存后，请点击“重新载入文件”。");
+    } catch (cause) {
+      setError(describeError(cause, "打开配置文件失败"));
+    }
+  }, []);
+
   return (
     <article>
       <h2>提供商配置（BYOK）</h2>
@@ -1946,6 +1978,24 @@ function ProviderProfilesSection() {
         一个配置统一整段会话的分析链路（实时字幕到正式报告）。API Key
         只保存在 Windows Credential Manager，不会写入数据库、日志或网络响应。
       </p>
+      <div style={{ marginBottom: 14 }}>
+        <p className="gateway-hint" style={{ overflowWrap: "anywhere", marginBottom: 6 }}>
+          配置文件：{configPath || "正在准备 provider_profiles.json…"}
+        </p>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {isTauriRuntime() && (
+            <button type="button" onClick={() => void openConfigFile()}>
+              打开配置文件
+            </button>
+          )}
+          <button type="button" onClick={() => void reloadConfigFile()}>
+            重新载入文件
+          </button>
+        </div>
+        <p className="gateway-hint" style={{ marginTop: 6 }}>
+          Endpoint、模型及 Workspace 可直接编辑；API Key 不写入文件，仍由 Windows Credential Manager 保存。
+        </p>
+      </div>
       {profiles.length === 0 && (
         <p className="gateway-hint">尚无配置；网关当前使用环境变量默认值。</p>
       )}
