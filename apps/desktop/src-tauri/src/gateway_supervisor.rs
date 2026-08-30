@@ -46,6 +46,7 @@ pub const SIDECAR_BASE_NAME: &str = "memecho-gateway";
 pub const ENV_HOST: &str = "MEMECHO_GATEWAY_HOST";
 pub const ENV_PORT: &str = "MEMECHO_GATEWAY_PORT";
 pub const ENV_TOKEN: &str = "MEMECHO_GATEWAY_TOKEN";
+pub const ENV_DATA_DIR: &str = "MEMECHO_DATA_DIR";
 
 /// Dev override: absolute path to a gateway executable to run as sidecar.
 pub const ENV_SIDECAR_OVERRIDE: &str = "MEMECHO_GATEWAY_SIDECAR";
@@ -93,6 +94,10 @@ pub struct SupervisorConfig {
     /// Extra environment variables (test/dev injection; secrets are always
     /// passed through `MEMECHO_GATEWAY_TOKEN` only).
     pub extra_env: Vec<(String, String)>,
+    /// Writable working directory used by the frozen Gateway for SQLite,
+    /// uploads, and temporary media. Installed applications must never use
+    /// the read-only Program Files directory for runtime state.
+    pub working_dir: Option<PathBuf>,
     /// Gateway version the handshake must report.
     pub expected_version: String,
     /// Fixed port (dev mode). `None` selects a random loopback port.
@@ -110,11 +115,22 @@ impl SupervisorConfig {
             program,
             args: Vec::new(),
             extra_env: Vec::new(),
+            working_dir: None,
             expected_version: env!("CARGO_PKG_VERSION").to_string(),
             port: None,
             startup_timeout: Duration::from_secs(30),
             poll_interval: Duration::from_millis(250),
         }
+    }
+
+    /// Configure the per-user writable directory for an installed sidecar.
+    pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
+        self.extra_env.push((
+            ENV_DATA_DIR.to_string(),
+            data_dir.to_string_lossy().into_owned(),
+        ));
+        self.working_dir = Some(data_dir);
+        self
     }
 }
 
@@ -226,11 +242,7 @@ enum ProbeOutcome {
     Invalid(String),
 }
 
-async fn probe_health(
-    client: &reqwest::Client,
-    base_url: &str,
-    token: &str,
-) -> ProbeOutcome {
+async fn probe_health(client: &reqwest::Client, base_url: &str, token: &str) -> ProbeOutcome {
     let base = base_url.trim_end_matches('/');
     let mut request = client.get(format!("{}/v1/health", base));
     if !token.is_empty() {
@@ -295,20 +307,29 @@ impl GatewaySupervisor {
     ) -> Result<GatewayConnectionInfo, SupervisorError> {
         self.shutdown().await;
 
+        if let Some(working_dir) = &config.working_dir {
+            std::fs::create_dir_all(working_dir)
+                .map_err(|error| SupervisorError::Spawn(error.to_string()))?;
+        }
+
         let port = match config.port {
             Some(port) => port,
             None => pick_loopback_port()?,
         };
         let token = generate_token();
-        let mut child = tokio::process::Command::from(build_sidecar_command(
+        let mut command = build_sidecar_command(
             &config.program,
             &config.args,
             &config.extra_env,
             port,
             &token,
-        ))
-        .spawn()
-        .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+        );
+        if let Some(working_dir) = &config.working_dir {
+            command.current_dir(working_dir);
+        }
+        let mut child = tokio::process::Command::from(command)
+            .spawn()
+            .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
 
         let url = format!("http://{}:{}", LOOPBACK_HOST, port);
         match await_handshake(&url, &token, config, &mut child).await {
@@ -344,8 +365,7 @@ impl GatewaySupervisor {
         &mut self,
         url: &str,
     ) -> Result<GatewayConnectionInfo, SupervisorError> {
-        crate::gateway_check::validate_gateway_url(url)
-            .map_err(SupervisorError::InvalidUrl)?;
+        crate::gateway_check::validate_gateway_url(url).map_err(SupervisorError::InvalidUrl)?;
         self.shutdown().await;
 
         let client = reqwest::Client::builder()
@@ -398,7 +418,10 @@ async fn await_handshake(
     child: &mut tokio::process::Child,
 ) -> Result<(String, u32), SupervisorError> {
     let deadline = Instant::now() + config.startup_timeout;
-    let probe_timeout = config.poll_interval.saturating_mul(4).max(Duration::from_secs(1));
+    let probe_timeout = config
+        .poll_interval
+        .saturating_mul(4)
+        .max(Duration::from_secs(1));
     let client = reqwest::Client::builder()
         .timeout(probe_timeout)
         .build()
@@ -491,9 +514,18 @@ mod tests {
 
         let envs: Vec<_> = cmd
             .get_envs()
-            .filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())))
+            .filter_map(|(k, v)| {
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
+            })
             .collect();
-        assert!(envs.iter().any(|(k, v)| k == ENV_HOST && v == LOOPBACK_HOST));
+        assert!(envs
+            .iter()
+            .any(|(k, v)| k == ENV_HOST && v == LOOPBACK_HOST));
         assert!(envs.iter().any(|(k, v)| k == ENV_PORT && v == "49321"));
         assert!(envs.iter().any(|(k, v)| k == ENV_TOKEN && v == &token));
         assert!(envs.iter().any(|(k, v)| k == "MEMECHO_EXTRA" && v == "1"));
@@ -520,8 +552,24 @@ mod tests {
     #[test]
     fn test_supervisor_config_defaults() {
         let config = SupervisorConfig::for_sidecar(PathBuf::from("memecho-gateway"));
-        assert!(config.port.is_none(), "production default must use a random port");
+        assert!(
+            config.port.is_none(),
+            "production default must use a random port"
+        );
         assert_eq!(config.expected_version, env!("CARGO_PKG_VERSION"));
         assert!(config.startup_timeout >= Duration::from_secs(5));
+        assert!(config.working_dir.is_none());
+    }
+
+    #[test]
+    fn test_sidecar_data_dir_is_writable_runtime_state() {
+        let data_dir = PathBuf::from("runtime-data");
+        let config = SupervisorConfig::for_sidecar(PathBuf::from("memecho-gateway"))
+            .with_data_dir(data_dir.clone());
+        assert_eq!(config.working_dir, Some(data_dir.clone()));
+        assert!(config
+            .extra_env
+            .iter()
+            .any(|(key, value)| { key == ENV_DATA_DIR && value == &data_dir.to_string_lossy() }));
     }
 }

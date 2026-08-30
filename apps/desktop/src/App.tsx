@@ -277,8 +277,10 @@ function NowPage() {
           }
         }
       })
-      .catch(() => {
-        // init failed — skip health check
+      .catch((cause) => {
+        if (cancelled) return;
+        setGatewayOk(false);
+        setGatewayError(describeError(cause, "Gateway 初始化失败"));
       });
     return () => {
       cancelled = true;
@@ -363,7 +365,7 @@ function NowPage() {
     setGatewayOk(null);
     setGatewayError("");
     try {
-      await initGatewayConfig();
+      await initGatewayConfig(true);
       if (isTauri) {
         const status = await bridge.checkGateway(getGatewayUrl());
         setGatewayOk(status.ok);
@@ -380,9 +382,9 @@ function NowPage() {
         }
         setGatewayOk(true);
       }
-    } catch {
+    } catch (cause) {
       setGatewayOk(false);
-      setGatewayError("Gateway check failed");
+      setGatewayError(describeError(cause, "Gateway check failed"));
     }
   }, [isTauri]);
 

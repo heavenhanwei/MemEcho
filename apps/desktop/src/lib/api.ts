@@ -46,21 +46,23 @@ export const gatewayBaseUrl = _url;
  *
  * Safe to call multiple times; first call wins. Returns the resolved URL.
  */
-export async function initGatewayConfig(): Promise<string> {
-  if (_initialized) return _url;
+export async function initGatewayConfig(forceRestart = false): Promise<string> {
+  if (_initialized && !forceRestart) return _url;
   if (isTauriRuntime()) {
     const { bridge } = await import("./tauri");
     try {
-      const runtime = await bridge.gatewayConnection();
+      let runtime = await bridge.gatewayConnection();
+      if (!runtime?.url) {
+        runtime = await bridge.startGatewaySidecar();
+      }
       if (runtime?.url) {
         _url = runtime.url;
-        if (runtime.token) {
-          // Sidecar one-time token: memory-only, used for Authorization
-          // headers — never embedded in a URL.
-          _token = runtime.token;
-          _initialized = true;
-          return _url;
-        }
+        // Sidecar one-time token: memory-only, used for Authorization
+        // headers — never embedded in a URL. External dev gateways can
+        // intentionally return an empty token.
+        _token = runtime.token ?? "";
+        _initialized = true;
+        return _url;
       }
     } catch {
       // Supervisor not active; fall through to explicit settings.

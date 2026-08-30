@@ -62,7 +62,10 @@ async fn test_sidecar_starts_on_random_port_and_shuts_down() {
     assert!(port >= 1024);
     assert!(!info.token.is_empty());
     assert_ne!(info.token, "change-me");
-    assert!(!info.url.contains(&info.token), "token must never be in the URL");
+    assert!(
+        !info.url.contains(&info.token),
+        "token must never be in the URL"
+    );
     assert_eq!(info.gateway_version, TEST_VERSION);
     assert_eq!(info.protocol_version, 1);
     assert_eq!(
@@ -72,7 +75,10 @@ async fn test_sidecar_starts_on_random_port_and_shuts_down() {
     );
 
     supervisor.shutdown().await;
-    assert!(supervisor.connection().is_none(), "shutdown clears the runtime");
+    assert!(
+        supervisor.connection().is_none(),
+        "shutdown clears the runtime"
+    );
     // Exit cleanup: the managed process no longer serves health checks.
     assert!(
         health_probe(&info.url).await.is_err(),
@@ -132,9 +138,10 @@ async fn test_sidecar_protocol_mismatch_returns_stable_error() {
 async fn test_sidecar_startup_timeout_returns_stable_error() {
     let mut config = sidecar_config();
     // The test sidecar sleeps before binding, so the handshake never starts.
-    config
-        .extra_env
-        .push(("MEMECHO_TEST_STARTUP_DELAY_SECS".to_string(), "30".to_string()));
+    config.extra_env.push((
+        "MEMECHO_TEST_STARTUP_DELAY_SECS".to_string(),
+        "30".to_string(),
+    ));
     config.startup_timeout = Duration::from_millis(600);
 
     let mut supervisor = GatewaySupervisor::new();
@@ -192,7 +199,10 @@ async fn test_external_dev_mode_attaches_without_managing_a_process() {
         .expect("dev mode should attach to an external gateway");
     assert_eq!(info.mode, SupervisorMode::External);
     assert_eq!(info.url, server.uri());
-    assert!(info.token.is_empty(), "external credentials stay in the OS credential store");
+    assert!(
+        info.token.is_empty(),
+        "external credentials stay in the OS credential store"
+    );
     assert_eq!(info.gateway_version, "0.9.0-dev");
 
     // Shutdown must be a no-op for unmanaged external runtimes.

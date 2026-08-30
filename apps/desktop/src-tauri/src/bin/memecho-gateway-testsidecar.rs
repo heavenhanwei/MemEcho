@@ -77,7 +77,10 @@ fn handle(mut stream: TcpStream, version: &str, protocol: &str, token: &str) {
     let (status, body) = if !wants_health {
         ("404 Not Found", "{}".to_string())
     } else if !authorized {
-        ("401 Unauthorized", r#"{"detail":"invalid gateway token"}"#.to_string())
+        (
+            "401 Unauthorized",
+            r#"{"detail":"invalid gateway token"}"#.to_string(),
+        )
     } else {
         (
             "200 OK",

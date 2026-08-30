@@ -589,10 +589,10 @@ pub async fn gateway_connection(
 pub async fn start_gateway_sidecar(
     state: State<'_, AppState>,
 ) -> Result<crate::gateway_supervisor::GatewayConnectionInfo, String> {
-    let program = crate::gateway_supervisor::resolve_sidecar_binary().ok_or_else(|| {
-        "gateway sidecar binary is not bundled with this build yet".to_string()
-    })?;
-    let config = crate::gateway_supervisor::SupervisorConfig::for_sidecar(program);
+    let program = crate::gateway_supervisor::resolve_sidecar_binary()
+        .ok_or_else(|| "gateway sidecar binary is not bundled with this build yet".to_string())?;
+    let config = crate::gateway_supervisor::SupervisorConfig::for_sidecar(program)
+        .with_data_dir(state.sessions_dir.join("gateway"));
     state
         .gateway
         .lock()

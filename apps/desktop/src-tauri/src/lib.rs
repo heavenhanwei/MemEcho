@@ -31,6 +31,7 @@ pub struct AppState {
 
 pub fn run() {
     let sessions_dir = paths::sessions_dir();
+    let gateway_data_dir = sessions_dir.join("gateway");
     let db_path = sessions_dir.join("memecho.db");
     let db = db::Repository::open(&db_path).expect("failed to open local database");
 
@@ -50,11 +51,13 @@ pub fn run() {
         })
         .setup({
             let gateway = gateway.clone();
+            let gateway_data_dir = gateway_data_dir.clone();
             move |_app| {
                 tauri::async_runtime::block_on(async move {
                     let mut supervisor = gateway.lock().await;
                     if let Some(program) = gateway_supervisor::resolve_sidecar_binary() {
-                        let config = gateway_supervisor::SupervisorConfig::for_sidecar(program);
+                        let config = gateway_supervisor::SupervisorConfig::for_sidecar(program)
+                            .with_data_dir(gateway_data_dir);
                         if let Err(error) = supervisor.start_sidecar(&config).await {
                             eprintln!("gateway sidecar failed to start: {}", error);
                         }
