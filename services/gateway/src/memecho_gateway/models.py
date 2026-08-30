@@ -59,12 +59,17 @@ class SessionCreate(StrictRequest):
     occurred_at: datetime
     source_mode: Literal["microphone", "system", "mixed", "import"]
     marks: list[dict[str, Any]] = Field(default_factory=list)
+    # Optional Provider Profile binding. When set, every task of this session
+    # (analyze, retry, identity resume, live captions) resolves providers and
+    # credentials from this profile instead of the global env configuration.
+    provider_profile_id: str | None = Field(default=None, max_length=64)
 
 
 class SessionCreated(BaseModel):
     id: str
     request_id: str
     status: JobStatus
+    provider_profile_id: str | None = None
 
 
 class UploadCreate(StrictRequest):
@@ -450,3 +455,99 @@ class ProcessingDetailsResponse(BaseModel):
     qwen_error_code: str | None = None
     transcript_segments: list[TranscriptSnippet]
     transcript_truncated: bool
+
+
+# ── Provider Profile contracts (BYOK) ────────────────────────────────────────
+
+
+class ProviderCapability(StrEnum):
+    realtime_asr = "realtime_asr"
+    file_transcription = "file_transcription"
+    diarization = "diarization"
+    audio_emotion = "audio_emotion"
+    text_analysis = "text_analysis"
+
+
+ProviderKind = Literal["bailian", "openai_compatible", "mock"]
+
+
+class ProviderProfileCreate(StrictRequest):
+    """Non-sensitive profile configuration.
+
+    Secrets are never accepted here: the API key lives in the OS credential
+    store and is referenced only via ``credential_ref``. Extra fields such as
+    ``api_key`` are rejected by the strict schema.
+    """
+
+    name: str = Field(min_length=1, max_length=120)
+    provider: ProviderKind
+    credential_ref: str | None = Field(default=None, max_length=255)
+    text_base_url: str = Field(default="", max_length=512)
+    text_model: str = Field(default="", max_length=120)
+    audio_base_url: str = Field(default="", max_length=512)
+    realtime_ws_url: str = Field(default="", max_length=512)
+    realtime_model: str = Field(default="", max_length=120)
+    workspace_id: str = Field(default="", max_length=120)
+
+
+class ProviderProfileUpdate(StrictRequest):
+    """Partial update. ``None`` means "unchanged"; empty string clears a field."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    credential_ref: str | None = Field(default=None, max_length=255)
+    text_base_url: str | None = Field(default=None, max_length=512)
+    text_model: str | None = Field(default=None, max_length=120)
+    audio_base_url: str | None = Field(default=None, max_length=512)
+    realtime_ws_url: str | None = Field(default=None, max_length=512)
+    realtime_model: str | None = Field(default=None, max_length=120)
+    workspace_id: str | None = Field(default=None, max_length=120)
+
+
+class ProviderProfileView(BaseModel):
+    """Profile as exposed by the API. Never contains secrets."""
+
+    id: str
+    name: str
+    provider: ProviderKind
+    credential_ref: str | None = None
+    text_base_url: str = ""
+    text_model: str = ""
+    audio_base_url: str = ""
+    realtime_ws_url: str = ""
+    realtime_model: str = ""
+    workspace_id: str = ""
+    capabilities: list[ProviderCapability] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProviderProfileList(BaseModel):
+    profiles: list[ProviderProfileView]
+
+
+class CapabilityProbe(BaseModel):
+    capability: ProviderCapability
+    status: Literal["ok", "failed", "unavailable"]
+    error_code: str | None = None
+
+
+class ProfileVerification(BaseModel):
+    """Result of a bill-free profile probe. Only stable error codes, never keys."""
+
+    profile_id: str
+    ok: bool
+    error_code: str | None = None
+    capabilities: list[CapabilityProbe] = Field(default_factory=list)
+
+
+class ProviderKindManifest(BaseModel):
+    id: ProviderKind
+    display_name: str
+    capabilities: list[ProviderCapability]
+    auth_fields: list[str]
+    media_inputs: list[str]
+
+
+class CapabilitiesResponse(BaseModel):
+    provider: str
+    provider_kinds: list[ProviderKindManifest]

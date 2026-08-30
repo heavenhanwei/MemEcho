@@ -45,6 +45,11 @@ class ProviderOverrides:
     audio_api_key: str = ""
     audio_endpoint: str = ""
     workspace_id: str = ""
+    # Profile the overrides were resolved from; None means the env/header
+    # compatibility path.
+    profile_id: str | None = None
+    # Capability gate: text-only profiles must not drive the audio modules.
+    supports_audio: bool = True
 
     @property
     def text_kwargs(self) -> dict[str, str]:
@@ -305,7 +310,9 @@ class Orchestrator:
     async def _run_text_only(
         self, job_id: str, session: Any, request: dict[str, Any],
         overrides: ProviderOverrides | None = None,
+        provider: Any | None = None,
     ) -> None:
+        effective_provider = provider or self.provider
         source = request.get("source") or {}
         text = source.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -350,7 +357,7 @@ class Orchestrator:
         session.resume_scheduled_jobs.discard(job_id)
         processing_details.set_qwen(session, ProcessingStage.running)
         text_kwargs = overrides.text_kwargs if overrides else {}
-        result = await self.provider.analyze(
+        result = await effective_provider.analyze(
             session={
                 "id": session.id,
                 "title": session.create.title,
@@ -384,17 +391,28 @@ class Orchestrator:
             self.store.save_session_result(session.id, result)
         await self.store.update_job(job_id, JobStatus.complete, 100, "Report complete")
 
-    async def run(self, job_id: str, session_id: str, request: dict[str, Any], overrides: ProviderOverrides | None = None) -> None:
+    async def run(
+        self,
+        job_id: str,
+        session_id: str,
+        request: dict[str, Any],
+        overrides: ProviderOverrides | None = None,
+        provider: Any | None = None,
+    ) -> None:
         session = self.store.sessions[session_id]
         request = session.analysis_requests.get(job_id, request)
         oss_keys: list[str] = []
         text_kwargs = overrides.text_kwargs if overrides else {}
         audio_kw = overrides.audio_kwargs if overrides else {}
+        # Text-only profiles must never drive remote audio modules; the gate
+        # keeps capability-driven selection out of business branches.
+        audio_enabled = overrides.supports_audio if overrides else True
+        effective_provider = provider or self.provider
         try:
             job = self.store.jobs[job_id]
             is_resume = job.status == JobStatus.awaiting_identity
             if is_text_only_request(request):
-                await self._run_text_only(job_id, session, request, overrides)
+                await self._run_text_only(job_id, session, request, overrides, provider)
                 return
 
             if not is_resume:
@@ -411,7 +429,7 @@ class Orchestrator:
                 model_errors: list[dict[str, str]] = []
 
                 remote_tracks: list[tuple[Any, Path, str]] = []
-                if self.oss and completed_uploads:
+                if audio_enabled and self.oss and completed_uploads:
                     prefix = getattr(
                         getattr(self.oss, "settings", None),
                         "oss_prefix",
@@ -570,7 +588,7 @@ class Orchestrator:
             await self.store.update_job(job_id, JobStatus.analyzing, 66, "Qwen3.7 正在形成回声")
             session.resume_scheduled_jobs.discard(job_id)
             processing_details.set_qwen(session, ProcessingStage.running)
-            result = await self.provider.analyze(
+            result = await effective_provider.analyze(
                 session={
                     "id": session.id,
                     "title": session.create.title,

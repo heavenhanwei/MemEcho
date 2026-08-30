@@ -23,18 +23,24 @@ import {
   clearLlmConfig,
   gateway,
   GatewayApiError,
+  getActiveProviderProfileId,
   getGatewayUrl,
   getLlmConfigState,
   hasGatewayToken,
   hasLlmConfig,
   initGatewayConfig,
   initLlmConfig,
+  saveProfileApiKey,
+  deleteProfileApiKey,
+  setActiveProviderProfileId,
   setGatewayUrl,
   setGatewayToken,
   setLlmConfig,
   type GatewayJob,
   type ParticipantCandidate,
   type ProcessingDetails,
+  type ProfileVerification,
+  type ProviderProfile,
 } from "./lib/api";
 import { startLivePcmCapture, type LivePcmCapture } from "./lib/livePcm";
 import {
@@ -70,6 +76,22 @@ function describeError(cause: unknown, fallback: string) {
   if (cause instanceof Error) return cause.message;
   if (typeof cause === "string" && cause) return cause;
   return fallback;
+}
+
+/** Create a gateway session bound to the active provider profile, if any. */
+async function createGatewaySession(title: string, sourceMode: string) {
+  const profileId = getActiveProviderProfileId();
+  if (!profileId) return gateway.createSession(title, sourceMode);
+  try {
+    return await gateway.createSession(title, sourceMode, profileId);
+  } catch (cause) {
+    // A deleted active profile must not block recording; drop it and retry unbound.
+    if (cause instanceof GatewayApiError && cause.status === 404) {
+      setActiveProviderProfileId("");
+      return gateway.createSession(title, sourceMode);
+    }
+    throw cause;
+  }
 }
 
 type WorkflowContext = {
@@ -610,7 +632,7 @@ function NowPage() {
     setCanRetry(false);
     setProcessingDetails(null);
     try {
-      const session = await gateway.createSession("新的回声", source);
+      const session = await createGatewaySession("新的回声", source);
       liveSessionId.current = session.id;
       liveRetryAttempt.current = 0;
       setLiveStatus("connecting");
@@ -939,7 +961,7 @@ function NowPage() {
       const imported = isTauri
         ? await bridge.importTextContent(text, title, file.name)
         : null;
-      const session = await gateway.createSession(title, "import");
+      const session = await createGatewaySession(title, "import");
       const context: WorkflowContext = {
         gatewaySessionId: session.id,
         requestId: session.request_id,
@@ -1797,6 +1819,295 @@ function RelationsPage() {
   );
 }
 
+const CAPABILITY_LABELS: Record<string, string> = {
+  realtime_asr: "实时转写",
+  file_transcription: "文件转写",
+  diarization: "说话人分离",
+  audio_emotion: "语音情绪",
+  text_analysis: "文本分析",
+};
+
+const PROFILE_ERROR_LABELS: Record<string, string> = {
+  provider_auth_failed: "认证失败（密钥无效或已过期）",
+  credential_unresolved: "无法从系统凭据库读取密钥",
+  endpoint_unreachable: "无法连接到服务端点",
+  profile_not_configured: "配置不完整",
+  upstream_error: "上游服务返回错误",
+  profile_not_found: "配置不存在",
+  profile_in_use: "配置仍被会话使用，无法删除",
+};
+
+function ProviderProfilesSection() {
+  const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
+  const [activeId, setActiveId] = useState(getActiveProviderProfileId());
+  const [name, setName] = useState("");
+  const [provider, setProvider] = useState<ProviderProfile["provider"]>("bailian");
+  const [textBaseUrl, setTextBaseUrl] = useState("");
+  const [textModel, setTextModel] = useState("");
+  const [audioBaseUrl, setAudioBaseUrl] = useState("");
+  const [realtimeWsUrl, setRealtimeWsUrl] = useState("");
+  const [realtimeModel, setRealtimeModel] = useState("");
+  const [workspaceId, setWorkspaceId] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [verifyingId, setVerifyingId] = useState("");
+  const [verifications, setVerifications] = useState<Record<string, ProfileVerification>>({});
+
+  const refresh = useCallback(async () => {
+    try {
+      setProfiles(await gateway.listProfiles());
+    } catch {
+      setProfiles([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const save = useCallback(async () => {
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      if (!name.trim()) throw new Error("请输入配置名称");
+      const created = await gateway.createProfile({
+        name: name.trim(),
+        provider,
+        text_base_url: textBaseUrl.trim(),
+        text_model: textModel.trim(),
+        audio_base_url: audioBaseUrl.trim(),
+        realtime_ws_url: realtimeWsUrl.trim(),
+        realtime_model: realtimeModel.trim(),
+        workspace_id: workspaceId.trim(),
+      });
+      if (provider !== "mock" && apiKey.trim()) {
+        const credentialRef = await saveProfileApiKey(created.id, apiKey.trim());
+        await gateway.updateProfile(created.id, { credential_ref: credentialRef });
+      }
+      setName("");
+      setTextBaseUrl("");
+      setTextModel("");
+      setAudioBaseUrl("");
+      setRealtimeWsUrl("");
+      setRealtimeModel("");
+      setWorkspaceId("");
+      setApiKey("");
+      await refresh();
+      setNotice("配置已创建；密钥仅保存在系统凭据库中。");
+    } catch (cause) {
+      setError(describeError(cause, "保存失败"));
+    } finally {
+      setSaving(false);
+    }
+  }, [name, provider, textBaseUrl, textModel, audioBaseUrl, realtimeWsUrl, realtimeModel, workspaceId, apiKey, refresh]);
+
+  const verify = useCallback(async (profileId: string) => {
+    setVerifyingId(profileId);
+    setError("");
+    try {
+      const result = await gateway.verifyProfile(profileId);
+      setVerifications((prev) => ({ ...prev, [profileId]: result }));
+    } catch (cause) {
+      setError(describeError(cause, "验证失败"));
+    } finally {
+      setVerifyingId("");
+    }
+  }, []);
+
+  const remove = useCallback(async (profile: ProviderProfile) => {
+    setError("");
+    try {
+      await gateway.deleteProfile(profile.id);
+      await deleteProfileApiKey(profile.id);
+      if (activeId === profile.id) {
+        setActiveId("");
+        setActiveProviderProfileId("");
+      }
+      setVerifications((prev) => {
+        const next = { ...prev };
+        delete next[profile.id];
+        return next;
+      });
+      await refresh();
+    } catch (cause) {
+      setError(describeError(cause, "删除失败"));
+    }
+  }, [activeId, refresh]);
+
+  return (
+    <article>
+      <h2>提供商配置（BYOK）</h2>
+      <p>
+        一个配置统一整段会话的分析链路（实时字幕到正式报告）。API Key
+        只保存在 Windows Credential Manager，不会写入数据库、日志或网络响应。
+      </p>
+      {profiles.length === 0 && (
+        <p className="gateway-hint">尚无配置；网关当前使用环境变量默认值。</p>
+      )}
+      {profiles.map((profile) => {
+        const result = verifications[profile.id];
+        return (
+          <div key={profile.id} style={{ marginBottom: 12 }}>
+            <p style={{ marginBottom: 4 }}>
+              <strong>{profile.name}</strong> · {profile.provider}
+              {profile.credential_ref ? " · 密钥已配置" : " · 未配置密钥"}
+            </p>
+            <p className="gateway-hint" style={{ marginBottom: 4 }}>
+              能力: {profile.capabilities.map((cap) => CAPABILITY_LABELS[cap] ?? cap).join("、")}
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                disabled={activeId === profile.id}
+                onClick={() => {
+                  setActiveId(profile.id);
+                  setActiveProviderProfileId(profile.id);
+                }}
+              >
+                {activeId === profile.id ? "使用中" : "设为默认"}
+              </button>
+              <button
+                type="button"
+                disabled={verifyingId === profile.id}
+                onClick={() => void verify(profile.id)}
+              >
+                {verifyingId === profile.id ? "验证中…" : "验证连接"}
+              </button>
+              <button type="button" onClick={() => void remove(profile)}>
+                删除
+              </button>
+            </div>
+            {result && (
+              <div className={result.ok ? "gateway-ok" : "error-banner"} style={{ marginTop: 6 }}>
+                {result.ok
+                  ? "✓ 连接正常"
+                  : `✗ ${PROFILE_ERROR_LABELS[result.error_code ?? ""] ?? result.error_code ?? "验证失败"}`}
+                <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                  {result.capabilities.map((probe) => (
+                    <li key={probe.capability}>
+                      {CAPABILITY_LABELS[probe.capability] ?? probe.capability}
+                      {probe.status === "ok" && "：✓"}
+                      {probe.status === "failed" &&
+                        `：✗ ${PROFILE_ERROR_LABELS[probe.error_code ?? ""] ?? probe.error_code ?? "失败"}`}
+                      {probe.status === "unavailable" && "：不适用"}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <h3 style={{ marginTop: 12 }}>新建配置</h3>
+      <div className="gateway-config-row">
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => { setName(e.target.value); setNotice(""); }}
+          placeholder="名称，如 百炼-生产"
+          className="gateway-url-input"
+        />
+      </div>
+      <div className="gateway-config-row" style={{ marginTop: 4 }}>
+        <select
+          value={provider}
+          onChange={(e) => setProvider(e.target.value as ProviderProfile["provider"])}
+          className="gateway-url-input"
+        >
+          <option value="bailian">阿里云百炼（语音 + 文本）</option>
+          <option value="openai_compatible">OpenAI 兼容接口（仅文本）</option>
+          <option value="mock">本地 Mock（无需密钥）</option>
+        </select>
+      </div>
+      {provider !== "mock" && (
+        <>
+          <div className="gateway-config-row" style={{ marginTop: 4 }}>
+            <input
+              type="text"
+              value={textBaseUrl}
+              onChange={(e) => setTextBaseUrl(e.target.value)}
+              placeholder="文本 Endpoint，如 https://dashscope.aliyuncs.com/compatible-mode/v1"
+              className="gateway-url-input"
+            />
+          </div>
+          <div className="gateway-config-row" style={{ marginTop: 4 }}>
+            <input
+              type="text"
+              value={textModel}
+              onChange={(e) => setTextModel(e.target.value)}
+              placeholder="文本模型，如 qwen-plus"
+              className="gateway-url-input"
+            />
+          </div>
+          {provider === "bailian" && (
+            <>
+              <div className="gateway-config-row" style={{ marginTop: 4 }}>
+                <input
+                  type="text"
+                  value={audioBaseUrl}
+                  onChange={(e) => setAudioBaseUrl(e.target.value)}
+                  placeholder="语音 Endpoint（可选，默认网关配置）"
+                  className="gateway-url-input"
+                />
+              </div>
+              <div className="gateway-config-row" style={{ marginTop: 4 }}>
+                <input
+                  type="text"
+                  value={realtimeWsUrl}
+                  onChange={(e) => setRealtimeWsUrl(e.target.value)}
+                  placeholder="实时 WebSocket 地址（可选）"
+                  className="gateway-url-input"
+                />
+              </div>
+              <div className="gateway-config-row" style={{ marginTop: 4 }}>
+                <input
+                  type="text"
+                  value={realtimeModel}
+                  onChange={(e) => setRealtimeModel(e.target.value)}
+                  placeholder="实时模型（可选）"
+                  className="gateway-url-input"
+                />
+              </div>
+              <div className="gateway-config-row" style={{ marginTop: 4 }}>
+                <input
+                  type="text"
+                  value={workspaceId}
+                  onChange={(e) => setWorkspaceId(e.target.value)}
+                  placeholder="Workspace ID（可选）"
+                  className="gateway-url-input"
+                />
+              </div>
+            </>
+          )}
+          <div className="gateway-config-row" style={{ marginTop: 4 }}>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="API Key（仅保存在系统凭据库）"
+              autoComplete="off"
+              className="gateway-url-input"
+            />
+          </div>
+        </>
+      )}
+      <button
+        type="button"
+        style={{ marginTop: 8 }}
+        disabled={saving || !name.trim()}
+        onClick={() => void save()}
+      >
+        {saving ? "保存中…" : "创建配置"}
+      </button>
+      {notice && <p className="gateway-ok">✓ {notice}</p>}
+      {error && <p className="error-banner">✗ {error}</p>}
+    </article>
+  );
+}
+
 function SettingsPage() {
   const [gwUrl, setGwUrl] = useState("");
   const [gwDraft, setGwDraft] = useState("");
@@ -1913,6 +2224,7 @@ function SettingsPage() {
       <p className="eyebrow">YOUR SPACE</p>
       <h1>你的声音，首先属于你。</h1>
       <div className="settings-grid">
+        <ProviderProfilesSection />
         <article>
           <h2>分析网关</h2>
           <p>
