@@ -4,7 +4,7 @@ import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { gateway, setGatewayToken } from "./lib/api";
+import { gateway, setActiveProviderProfileId, setGatewayToken } from "./lib/api";
 import { useAppStore } from "./store";
 
 vi.mock("@react-three/fiber", () => ({
@@ -248,6 +248,36 @@ describe("App (web preview)", () => {
 });
 
 describe("App (live resilience and Tauri desktop)", () => {
+  it("makes a newly created provider profile the default for the next session", async () => {
+    vi.mocked(gateway.createProfile).mockResolvedValue({
+      id: "prof-new",
+      name: "百炼路演",
+      provider: "bailian",
+      text_base_url: "",
+      text_model: "",
+      audio_base_url: "",
+      realtime_ws_url: "",
+      realtime_model: "",
+      workspace_id: "",
+      credential_ref: null,
+      capabilities: [],
+      created_at: "2026-08-30T00:00:00Z",
+      updated_at: "2026-08-30T00:00:00Z",
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByText("我的"));
+    fireEvent.change(await screen.findByPlaceholderText("名称，如 百炼-生产"), {
+      target: { value: "百炼路演" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建配置" }));
+
+    await waitFor(() =>
+      expect(setActiveProviderProfileId).toHaveBeenCalledWith("prof-new"),
+    );
+    expect(await screen.findByText(/配置已创建并设为默认/)).toBeInTheDocument();
+  });
+
   it("stores the gateway token through the desktop credential bridge", async () => {
     mockIPC((cmd) => {
       if (cmd === "list_audio_devices") return [];

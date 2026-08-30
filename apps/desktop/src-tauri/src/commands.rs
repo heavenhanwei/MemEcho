@@ -496,8 +496,8 @@ pub fn import_text_content(
 }
 /// Upload session audio tracks to the gateway.
 ///
-/// Validates IDs and URL, reads gateway token from Windows Credential Manager,
-/// streams SHA-256 checksums, uploads chunks with retry, and verifies completion.
+/// Uses the managed Sidecar's memory-only token when its URL is targeted;
+/// explicit external gateways fall back to Windows Credential Manager.
 #[tauri::command]
 pub async fn upload_session_tracks(
     local_session_id: String,
@@ -505,11 +505,23 @@ pub async fn upload_session_tracks(
     gateway_base_url: String,
     state: State<'_, AppState>,
 ) -> Result<UploadSessionTracksResult, String> {
-    crate::upload::upload_session_tracks_impl(
+    let runtime = {
+        let mut supervisor = state.gateway.lock().await;
+        supervisor.connection()
+    };
+    let stored_token = crate::credential::credential_get("gateway_token").unwrap_or_default();
+    let token = crate::upload::select_gateway_token(
+        &gateway_base_url,
+        runtime.as_ref().map(|connection| connection.url.as_str()),
+        runtime.as_ref().map(|connection| connection.token.as_str()),
+        &stored_token,
+    );
+    crate::upload::upload_session_tracks_with_token(
         local_session_id,
         gateway_session_id,
         gateway_base_url,
         &state.sessions_dir,
+        token,
     )
     .await
     .map_err(|e| {

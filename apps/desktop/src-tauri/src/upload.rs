@@ -422,6 +422,24 @@ pub async fn upload_session_tracks_with_token(
     })
 }
 
+/// Select the in-memory one-time Sidecar token when the upload targets that
+/// runtime. Credential Manager remains the fallback for explicit external
+/// gateways only.
+pub fn select_gateway_token(
+    requested_url: &str,
+    runtime_url: Option<&str>,
+    runtime_token: Option<&str>,
+    stored_token: &str,
+) -> String {
+    let requested = requested_url.trim_end_matches('/');
+    if runtime_url.map(|value| value.trim_end_matches('/')) == Some(requested) {
+        if let Some(token) = runtime_token.filter(|value| !value.is_empty()) {
+            return token.to_string();
+        }
+    }
+    stored_token.to_string()
+}
+
 /// Production entry point: upload both mic and loopback tracks for a session.
 ///
 /// Reads the gateway token from Windows Credential Manager, then delegates to
@@ -491,6 +509,28 @@ mod tests {
     fn test_validate_gateway_url_https() {
         assert!(validate_gateway_url("https://gateway.example.com").is_ok());
         assert!(validate_gateway_url("https://gateway.example.com:8080").is_ok());
+    }
+
+    #[test]
+    fn test_select_gateway_token_prefers_matching_sidecar_runtime() {
+        assert_eq!(
+            select_gateway_token(
+                "http://127.0.0.1:54321",
+                Some("http://127.0.0.1:54321/"),
+                Some("one-time-token"),
+                "stale-stored-token",
+            ),
+            "one-time-token"
+        );
+        assert_eq!(
+            select_gateway_token(
+                "https://gateway.example",
+                Some("http://127.0.0.1:54321"),
+                Some("one-time-token"),
+                "external-token",
+            ),
+            "external-token"
+        );
     }
 
     #[test]

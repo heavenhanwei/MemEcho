@@ -1898,6 +1898,8 @@ function ProviderProfilesSection() {
         const credentialRef = await saveProfileApiKey(created.id, apiKey.trim());
         await gateway.updateProfile(created.id, { credential_ref: credentialRef });
       }
+      setActiveId(created.id);
+      setActiveProviderProfileId(created.id);
       setName("");
       setTextBaseUrl("");
       setTextModel("");
@@ -1907,7 +1909,7 @@ function ProviderProfilesSection() {
       setWorkspaceId("");
       setApiKey("");
       await refresh();
-      setNotice("配置已创建；密钥仅保存在系统凭据库中。");
+      setNotice("配置已创建并设为默认；密钥仅保存在系统凭据库中。");
     } catch (cause) {
       setError(describeError(cause, "保存失败"));
     } finally {
