@@ -396,6 +396,29 @@ PHASE_TO_STATUS: dict[FileTransPhase, ProcessingStage] = {
     FileTransPhase.timed_out: ProcessingStage.failed,
 }
 
+# Canonical FileTrans steps the UI contract requires: submitted → polling →
+# downloading → parsing → completed, plus failed/timeout/cancelled. The
+# fine-grained phases above map onto these steps.
+FILETRANS_CANONICAL_STEPS: dict[str, tuple[FileTransPhase, ...]] = {
+    "submitted": (FileTransPhase.submitting, FileTransPhase.queued),
+    "polling": (FileTransPhase.polling,),
+    "downloading": (FileTransPhase.downloading,),
+    "parsing": (FileTransPhase.normalizing,),
+    "completed": (FileTransPhase.succeeded,),
+}
+
+PHASE_TO_CANONICAL_STEP: dict[FileTransPhase, str] = {
+    phase: step
+    for step, phases in FILETRANS_CANONICAL_STEPS.items()
+    for phase in phases
+}
+
+# Phases whose upstream task is still live: the persisted task reference can
+# be polled again after a retry or restart instead of resubmitting.
+RECOVERABLE_FILETRANS_PHASES: frozenset[FileTransPhase] = frozenset(
+    {FileTransPhase.polling, FileTransPhase.timed_out}
+)
+
 
 class ModuleDetails(BaseModel):
     """Sanitized per-module status. Only stable error codes, never raw text."""

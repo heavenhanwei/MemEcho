@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import __version__, media_cleanup, processing_details
+from . import __version__, media_cleanup, persistence, processing_details
 from . import profiles as profile_registry
 from .config import Settings, get_settings
 from .credentials import build_default_credential_resolver
@@ -113,7 +113,18 @@ def awaiting_identity_job(session_id: str) -> JobView | None:
 
 is_mock = settings.memecho_provider != "bailian"
 provider = BailianProvider(settings) if not is_mock else MockProvider()
-oss_client = AliyunOSSClient(settings, mock=is_mock)
+# Object storage is an optional Media Transport, not a core dependency.
+# Demo/mock mode keeps the in-memory store; real mode only enables it when
+# fully configured, otherwise providers must accept direct transports.
+_oss_configured = bool(
+    settings.oss_endpoint
+    and settings.oss_bucket
+    and settings.oss_access_key_id
+    and settings.oss_access_key_secret
+)
+oss_client = AliyunOSSClient(settings, mock=True) if is_mock else (
+    AliyunOSSClient(settings) if _oss_configured else None
+)
 dashscope_client = DashScopeClient(settings, mock=is_mock)
 transcription_downloader = TranscriptionDownloader(settings, mock=is_mock)
 orchestrator = Orchestrator(
@@ -136,10 +147,42 @@ async def lifespan(_: FastAPI):
     settings.memecho_data_dir.mkdir(parents=True, exist_ok=True)
     # Initialize persistent store and load persisted state
     await store.initialize()
-    # Mark unfinished jobs as failed so they can be retried
+    # Recover interrupted jobs. Jobs holding a resumable upstream async task
+    # reference continue polling the same upstream task id (a restart must
+    # never resubmit a billable task); everything else is marked failed so it
+    # can be retried.
     for job_info in store.get_unfinished_jobs():
         job_id = job_info["id"]
         session_id = job_info["session_id"]
+        session = store.sessions.get(session_id)
+        original_request = (
+            session.analysis_requests.get(job_id) if session else None
+        )
+        resumable = session is not None and any(
+            task.get("upstream_task_id")
+            and task.get("status") in persistence.UPSTREAM_RESUMABLE_STATUSES
+            for task in store.upstream_tasks_for_job(job_id)
+        )
+        if (
+            resumable
+            and original_request is not None
+            and job_id not in session.resume_scheduled_jobs
+        ):
+            session.resume_scheduled_jobs.add(job_id)
+            store.save_resume_scheduled_job(session_id, job_id)
+            try:
+                await store.update_job(
+                    job_id,
+                    JobStatus.transcribing,
+                    job_info["progress"],
+                    "Gateway 重启，恢复上游任务轮询",
+                )
+            except Exception:
+                log.warning("Failed to mark job %s for upstream resume", job_id)
+            asyncio.create_task(
+                orchestrator.run(job_id, session_id, original_request.copy())
+            )
+            continue
         if session_id in store.sessions:
             try:
                 await store.update_job(

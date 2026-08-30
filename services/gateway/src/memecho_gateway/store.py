@@ -53,6 +53,8 @@ class MemoryStore:
         self.events: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self.idempotency: dict[str, str] = {}
         self.profiles: dict[str, ProviderProfileView] = {}
+        # Async upstream task references keyed by (job_id, capability, upload_id).
+        self.upstream_tasks: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.lock = asyncio.Lock()
 
     async def create_session(self, payload: SessionCreate) -> SessionRecord:
@@ -105,6 +107,60 @@ class MemoryStore:
         self.jobs[job_id] = updated
         await self.events[job_id].put(updated.model_dump(mode="json"))
         return updated
+
+    @staticmethod
+    def _upstream_key(
+        job_id: str, capability: str, upload_id: str
+    ) -> tuple[str, str, str]:
+        return (job_id, capability, upload_id)
+
+    def save_upstream_task(self, record: dict[str, Any]) -> None:
+        """Upsert an async upstream task reference."""
+        key = self._upstream_key(
+            record["job_id"], record["capability"], record["upload_id"]
+        )
+        existing = self.upstream_tasks.get(key)
+        merged = {**(existing or {}), **record}
+        self.upstream_tasks[key] = merged
+
+    def update_upstream_task(
+        self,
+        job_id: str,
+        capability: str,
+        upload_id: str,
+        fields: dict[str, Any],
+    ) -> None:
+        """Apply a partial update; missing records are left untouched."""
+        record = self.upstream_tasks.get(
+            self._upstream_key(job_id, capability, upload_id)
+        )
+        if record is None:
+            return
+        record.update({name: value for name, value in fields.items() if value is not None})
+
+    def get_upstream_task(
+        self, job_id: str, capability: str, upload_id: str
+    ) -> dict[str, Any] | None:
+        record = self.upstream_tasks.get(
+            self._upstream_key(job_id, capability, upload_id)
+        )
+        return dict(record) if record is not None else None
+
+    def upstream_tasks_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(record)
+            for (stored_job_id, _, _), record in self.upstream_tasks.items()
+            if stored_job_id == job_id
+        ]
+
+    def resumable_upstream_tasks(self) -> list[dict[str, Any]]:
+        """Live upstream references that must be polled again, never resubmitted."""
+        return [
+            dict(record)
+            for record in self.upstream_tasks.values()
+            if record.get("upstream_task_id")
+            and record.get("status") in persistence.UPSTREAM_RESUMABLE_STATUSES
+        ]
 
 
 class PersistentStore(MemoryStore):
@@ -245,6 +301,15 @@ class PersistentStore(MemoryStore):
                     exc_info=True,
                 )
 
+        # Load async upstream task references; drop any whose job was lost.
+        for record in persistence.load_all_upstream_tasks(self.db_path):
+            if record["job_id"] in self.jobs:
+                self.upstream_tasks[
+                    self._upstream_key(
+                        record["job_id"], record["capability"], record["upload_id"]
+                    )
+                ] = record
+
         log.info(
             "Loaded %d sessions, %d jobs from persistence",
             len(self.sessions),
@@ -368,6 +433,29 @@ class PersistentStore(MemoryStore):
         """Persist resume scheduled job."""
         persistence.save_resume_scheduled_job(self.db_path, session_id, job_id)
 
+    def save_upstream_task(self, record: dict[str, Any]) -> None:
+        """Persist an async upstream task reference."""
+        super().save_upstream_task(record)
+        merged = self.upstream_tasks[
+            self._upstream_key(
+                record["job_id"], record["capability"], record["upload_id"]
+            )
+        ]
+        persistence.save_upstream_task(self.db_path, merged)
+
+    def update_upstream_task(
+        self,
+        job_id: str,
+        capability: str,
+        upload_id: str,
+        fields: dict[str, Any],
+    ) -> None:
+        """Persist a partial upstream task update."""
+        super().update_upstream_task(job_id, capability, upload_id, fields)
+        persistence.update_upstream_task(
+            self.db_path, job_id, capability, upload_id, fields
+        )
+
     def get_unfinished_jobs(self) -> list[dict[str, Any]]:
         """Get jobs that were in progress when the server stopped."""
         return persistence.get_unfinished_jobs(self.db_path)
@@ -379,16 +467,24 @@ class PersistentStore(MemoryStore):
             session = self.sessions.pop(session_id, None)
             if session is None:
                 return
+            removed_job_ids: set[str] = set()
             for job_id in [
                 job_id for job_id, job in self.jobs.items()
                 if job.session_id == session_id
             ]:
                 self.jobs.pop(job_id, None)
                 self.events.pop(job_id, None)
+                removed_job_ids.add(job_id)
                 self.idempotency = {
                     request_id: mapped
                     for request_id, mapped in self.idempotency.items()
                     if mapped != job_id
+                }
+            if removed_job_ids:
+                self.upstream_tasks = {
+                    key: record
+                    for key, record in self.upstream_tasks.items()
+                    if key[0] not in removed_job_ids
                 }
         persistence.delete_session(self.db_path, session_id)
 

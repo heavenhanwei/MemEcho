@@ -236,6 +236,11 @@ async def test_fun_asr_result_url_is_downloaded_and_normalized(tmp_path, monkeyp
         }
 
     transcription.download = download
+
+    async def download_with_phase(_url, on_phase=None, on_submitted=None):
+        return await download(_url)
+
+    transcription.download_with_phase = download_with_phase
     orchestrator = Orchestrator(
         MemoryStore(tmp_path),
         object(),

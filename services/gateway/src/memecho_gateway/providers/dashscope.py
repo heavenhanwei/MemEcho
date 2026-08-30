@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..config import Settings
+from ..media import ALL_MEDIA_INPUTS, MediaInput
 
 log = logging.getLogger(__name__)
 
@@ -96,9 +97,21 @@ def validate_audio_url(url: str, *, content_type: str | None = None) -> None:
 
 
 class DashScopeClient:
+    provider_id = "bailian"
+
     def __init__(self, settings: Settings, mock: bool = False):
         self.settings = settings
         self.mock = mock
+        # Fun-ASR / emotion / FileTrans tasks take an audio URL, so the real
+        # endpoint only accepts public_url. Mock mode accepts every transport
+        # (public_url first) to preserve the demo pipeline.
+        if mock:
+            self.media_inputs: tuple[MediaInput, ...] = (
+                MediaInput.public_url,
+                *(item for item in ALL_MEDIA_INPUTS if item != MediaInput.public_url),
+            )
+        else:
+            self.media_inputs = (MediaInput.public_url,)
 
     @staticmethod
     def sanitize_task_id(task_id: str) -> str:

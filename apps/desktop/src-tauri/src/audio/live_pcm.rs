@@ -74,6 +74,16 @@ impl Resampler {
 type SharedBuffer = Arc<Mutex<Vec<u8>>>;
 type SharedError = Arc<Mutex<Option<String>>>;
 
+/// Append only when capture is still unpaused while holding the buffer lock.
+/// Pairing this with `LiveStream::set_paused` closes the race where a producer
+/// observed `false`, was descheduled, and appended after pause had returned.
+fn append_if_running(buffer: &SharedBuffer, pause: &AtomicBool, bytes: &[u8]) {
+    let mut output = buffer.lock();
+    if !pause.load(Ordering::SeqCst) {
+        output.extend_from_slice(bytes);
+    }
+}
+
 /// Running live stream handle. Dropping this signals the threads to stop
 /// but does NOT join them — call `stop()` for a clean shutdown.
 pub struct LiveStream {
@@ -89,6 +99,12 @@ impl LiveStream {
     /// no PCM is appended to the buffer (and buffered data stays intact).
     pub fn set_paused(&self, paused: bool) {
         self.pause_flag.store(paused, Ordering::SeqCst);
+        if paused {
+            // Wait for any producer that entered before the flag changed.
+            // Once this lock round-trip completes, no later append can pass
+            // `append_if_running` until the stream is resumed.
+            drop(self.buffer.lock());
+        }
     }
 
     /// Drain all buffered PCM bytes (thread-safe, brief lock).
@@ -278,7 +294,7 @@ pub mod wasapi_live {
                     if !pause.load(Ordering::SeqCst) {
                         let mixed = mix_pcm16(&mic_data, &sys_data);
                         if !mixed.is_empty() {
-                            buffer.lock().extend_from_slice(&mixed);
+                            append_if_running(&buffer, &pause, &mixed);
                         }
                     }
 
@@ -294,7 +310,7 @@ pub mod wasapi_live {
                 if !pause.load(Ordering::SeqCst) {
                     let final_mixed = mix_pcm16(&final_mic, &final_sys);
                     if !final_mixed.is_empty() {
-                        buffer.lock().extend_from_slice(&final_mixed);
+                        append_if_running(&buffer, &pause, &final_mixed);
                     }
                 }
             }
@@ -497,7 +513,7 @@ pub mod wasapi_live {
             let resampled = ctx.resampler.process(&mono_f32);
             if !resampled.is_empty() {
                 let pcm = f32_to_i16_bytes(&resampled);
-                buffer.lock().extend_from_slice(&pcm);
+                append_if_running(buffer, pause, &pcm);
             }
         }
     }
@@ -592,7 +608,7 @@ pub mod mock_live {
                 let chunk = vec![0u8; 320];
                 while !stop.load(Ordering::SeqCst) {
                     if src != "none" && !pause.load(Ordering::SeqCst) {
-                        buf.lock().extend_from_slice(&chunk);
+                        append_if_running(&buf, &pause, &chunk);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
@@ -653,7 +669,7 @@ mod tests {
             let chunk = vec![0u8; 320];
             while !stop.load(Ordering::SeqCst) {
                 if !pause.load(Ordering::SeqCst) {
-                    buf.lock().extend_from_slice(&chunk);
+                    append_if_running(&buf, &pause, &chunk);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(chunk_interval_ms));
             }

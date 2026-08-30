@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..config import Settings
+from ..media import ALL_MEDIA_INPUTS, MediaInput, PreparedMedia
 from .dashscope import DashScopeClient, PhaseCallback
 
 log = logging.getLogger(__name__)
@@ -35,10 +36,23 @@ def _validate_audio_url(url: str) -> None:
 
 
 class TranscriptionDownloader:
+    provider_id = "bailian"
+    capability = "file_transcription"
+
     def __init__(self, settings: Settings, mock: bool = False):
         self.settings = settings
         self.mock = mock
         self.dashscope = DashScopeClient(settings, mock=mock)
+        # Real DashScope FileTrans only accepts a public URL; mock/demo mode
+        # accepts every transport, preferring public_url so the existing demo
+        # pipeline (mock object storage) is unchanged.
+        if mock:
+            self.media_inputs: tuple[MediaInput, ...] = (
+                MediaInput.public_url,
+                *(item for item in ALL_MEDIA_INPUTS if item != MediaInput.public_url),
+            )
+        else:
+            self.media_inputs = (MediaInput.public_url,)
 
     async def download(self, url: str) -> dict[str, Any]:
         if self.mock:
@@ -82,8 +96,14 @@ class TranscriptionDownloader:
         url: str,
         *,
         on_phase: PhaseCallback | None = None,
+        on_submitted: Any | None = None,
     ) -> dict[str, Any]:
-        """Download transcription with phase callbacks for real-time tracking."""
+        """Download transcription with phase callbacks for real-time tracking.
+
+        ``on_submitted(task_id)`` fires exactly once with the raw upstream
+        task id right after the (billable) submission succeeds, so callers
+        can persist the reference before any polling happens.
+        """
         if self.mock:
             return self._mock_transcription(url)
 
@@ -99,15 +119,69 @@ class TranscriptionDownloader:
             DashScopeClient.sanitize_task_id(task_id),
             _sanitize_url_for_log(url),
         )
+        if on_submitted is not None:
+            on_submitted(task_id)
 
         if on_phase:
-            on_phase("queued", task_reference=DashScopeClient.sanitize_task_id(task_id))
+            on_phase(
+                "queued",
+                task_reference=DashScopeClient.sanitize_task_id(task_id),
+                task_id=task_id,
+            )
 
+        return await self._finalize_task(task_id, t0, on_phase)
+
+    async def download_with_media(
+        self,
+        media: PreparedMedia,
+        *,
+        on_phase: PhaseCallback | None = None,
+        on_submitted: Any | None = None,
+    ) -> dict[str, Any]:
+        """Transport-aware FileTrans entry point.
+
+        The real DashScope adapter only accepts ``public_url``; other
+        transports are accepted here so alternative providers (direct binary
+        upload, local models) can plug in without touching the pipeline.
+        """
+        if self.mock:
+            return self._mock_transcription(media.audio_reference() if media.url else media.transport_id)
+        return await self.download_with_phase(
+            media.audio_reference(), on_phase=on_phase, on_submitted=on_submitted
+        )
+
+    async def resume_with_phase(
+        self,
+        task_id: str,
+        *,
+        on_phase: PhaseCallback | None = None,
+    ) -> dict[str, Any]:
+        """Continue polling an already-submitted upstream task.
+
+        Used after a gateway restart: the task reference is recovered from
+        persistence and polling resumes. This path never resubmits, so a
+        restart cannot double-bill the same transcription.
+        """
+        if self.mock:
+            return self._mock_transcription(f"resume:{task_id}")
+        log.info(
+            "FileTrans resuming task_ref=%s", DashScopeClient.sanitize_task_id(task_id)
+        )
+        t0 = time.monotonic()
+        return await self._finalize_task(task_id, t0, on_phase)
+
+    async def _finalize_task(
+        self,
+        task_id: str,
+        start_time: float,
+        on_phase: PhaseCallback | None,
+    ) -> dict[str, Any]:
+        """Poll a submitted task, then fetch and normalize its result."""
         task_result = await self.dashscope.poll_task_result(
-            task_id, on_phase=on_phase, start_time=t0,
+            task_id, on_phase=on_phase, start_time=start_time,
         )
         if on_phase:
-            on_phase("downloading", elapsed_ms=int((time.monotonic() - t0) * 1000))
+            on_phase("downloading", elapsed_ms=int((time.monotonic() - start_time) * 1000))
 
         try:
             transcription_url = self._transcription_url(task_result)
@@ -122,7 +196,7 @@ class TranscriptionDownloader:
             raw = resp.json()
 
         if on_phase:
-            on_phase("normalizing", elapsed_ms=int((time.monotonic() - t0) * 1000))
+            on_phase("normalizing", elapsed_ms=int((time.monotonic() - start_time) * 1000))
 
         normalized = self._normalize_result(raw)
         sentence_count = len(normalized.get("transcript", []))
@@ -134,7 +208,7 @@ class TranscriptionDownloader:
         if on_phase:
             on_phase(
                 "succeeded",
-                elapsed_ms=int((time.monotonic() - t0) * 1000),
+                elapsed_ms=int((time.monotonic() - start_time) * 1000),
                 sentence_count=sentence_count,
                 language=normalized.get("language"),
                 audio_duration_ms=normalized.get("duration_ms"),

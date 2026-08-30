@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from .media import MediaInputUnsupportedError
 from .models import (
     FileTransDetails,
     FileTransPhase,
@@ -33,6 +34,8 @@ TRANSCRIPT_TEXT_LIMIT = 500
 
 def safe_error_code(exc: BaseException) -> str:
     """Map an exception to a stable, bounded error code without its message."""
+    if isinstance(exc, MediaInputUnsupportedError):
+        return "media_input_unsupported"
     if isinstance(exc, asyncio.TimeoutError | TimeoutError):
         return "upstream_timeout"
     if isinstance(exc, httpx.HTTPStatusError):
