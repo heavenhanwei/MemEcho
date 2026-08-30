@@ -156,6 +156,19 @@ export interface GatewayStatus {
   error?: string;
 }
 
+/**
+ * Mirrors `gateway_supervisor::GatewayConnectionInfo`. Runtime connection
+ * prepared by the Gateway Supervisor: managed sidecar (random loopback port
+ * + one-time token) or an explicit external/dev gateway. Memory-only.
+ */
+export interface GatewayConnectionInfo {
+  mode: "sidecar" | "external";
+  url: string;
+  token: string;
+  gateway_version: string;
+  protocol_version: number;
+}
+
 /** Mirrors `llm_config::LlmConfig`. Non-secret LLM settings stored as JSON. */
 export interface LlmConfig {
   text_endpoint: string;
@@ -295,6 +308,11 @@ export const bridge = {
     invoke<void>("set_gateway_url", { gatewayUrl }),
 
   getGatewayUrl: () => invoke<string | null>("get_gateway_url"),
+
+  gatewayConnection: () =>
+    invoke<GatewayConnectionInfo | null>("gateway_connection"),
+
+  startGatewaySidecar: () => invoke<GatewayConnectionInfo>("start_gateway_sidecar"),
 
   getLlmConfig: () => invoke<LlmConfig>("get_llm_config"),
 

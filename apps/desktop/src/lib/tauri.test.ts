@@ -301,3 +301,33 @@ describe("bridge desktop persistence commands", () => {
     ).rejects.toThrow("installed memEcho desktop app");
   });
 });
+
+describe("bridge gateway runtime commands", () => {
+  it("reads the supervisor runtime connection without arguments", async () => {
+    const runtime = {
+      mode: "sidecar",
+      url: "http://127.0.0.1:54321",
+      token: "one-time-token",
+      gateway_version: "0.1.0",
+      protocol_version: 1,
+    };
+    const calls = installMock((cmd) => (cmd === "gateway_connection" ? runtime : null));
+    await expect(bridge.gatewayConnection()).resolves.toEqual(runtime);
+    expect(calls[0].cmd).toBe("gateway_connection");
+  });
+
+  it("returns null when no gateway runtime is active", async () => {
+    installMock(() => null);
+    await expect(bridge.gatewayConnection()).resolves.toBeNull();
+  });
+
+  it("starts the bundled sidecar and surfaces stable errors", async () => {
+    installMock((cmd) => {
+      if (cmd === "start_gateway_sidecar") {
+        throw new Error("gateway sidecar binary is not bundled with this build yet");
+      }
+      return null;
+    });
+    await expect(bridge.startGatewaySidecar()).rejects.toThrow("not bundled");
+  });
+});
