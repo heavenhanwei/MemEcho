@@ -580,7 +580,8 @@ pub fn get_gateway_url(state: State<'_, AppState>) -> Option<String> {
 pub async fn gateway_connection(
     state: State<'_, AppState>,
 ) -> Result<Option<crate::gateway_supervisor::GatewayConnectionInfo>, String> {
-    Ok(state.gateway.lock().await.connection())
+    let mut supervisor = state.gateway.lock().await;
+    Ok(supervisor.connection())
 }
 
 /// Explicitly (re)start the bundled gateway sidecar on a random loopback

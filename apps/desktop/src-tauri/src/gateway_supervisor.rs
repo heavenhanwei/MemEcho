@@ -46,6 +46,7 @@ pub const SIDECAR_BASE_NAME: &str = "memecho-gateway";
 pub const ENV_HOST: &str = "MEMECHO_GATEWAY_HOST";
 pub const ENV_PORT: &str = "MEMECHO_GATEWAY_PORT";
 pub const ENV_TOKEN: &str = "MEMECHO_GATEWAY_TOKEN";
+pub const ENV_ACCESS_TOKEN: &str = "MEMECHO_DEMO_TOKEN";
 pub const ENV_DATA_DIR: &str = "MEMECHO_DATA_DIR";
 
 /// Dev override: absolute path to a gateway executable to run as sidecar.
@@ -187,7 +188,10 @@ pub fn build_sidecar_command(
     cmd.args(args)
         .env(ENV_HOST, LOOPBACK_HOST)
         .env(ENV_PORT, port.to_string())
-        .env(ENV_TOKEN, token);
+        // Keep the supervisor-facing name for compatibility and provide the
+        // application setting consumed by pydantic-settings in the Gateway.
+        .env(ENV_TOKEN, token)
+        .env(ENV_ACCESS_TOKEN, token);
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
@@ -293,8 +297,17 @@ impl GatewaySupervisor {
     }
 
     /// Connection info for the active runtime, if any.
-    pub fn connection(&self) -> Option<GatewayConnectionInfo> {
-        self.runtime.as_ref().map(|r| r.info.clone())
+    pub fn connection(&mut self) -> Option<GatewayConnectionInfo> {
+        let exited = self
+            .runtime
+            .as_mut()
+            .and_then(|runtime| runtime.child.as_mut())
+            .and_then(|child| child.try_wait().ok().flatten())
+            .is_some();
+        if exited {
+            self.runtime = None;
+        }
+        self.runtime.as_ref().map(|runtime| runtime.info.clone())
     }
 
     /// Spawn a managed gateway sidecar and complete the startup handshake.
@@ -326,6 +339,17 @@ impl GatewaySupervisor {
         );
         if let Some(working_dir) = &config.working_dir {
             command.current_dir(working_dir);
+            let stdout = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(working_dir.join("gateway.stdout.log"))
+                .map_err(|error| SupervisorError::Spawn(error.to_string()))?;
+            let stderr = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(working_dir.join("gateway.stderr.log"))
+                .map_err(|error| SupervisorError::Spawn(error.to_string()))?;
+            command.stdout(stdout).stderr(stderr);
         }
         let mut child = tokio::process::Command::from(command)
             .spawn()
@@ -528,6 +552,9 @@ mod tests {
             .any(|(k, v)| k == ENV_HOST && v == LOOPBACK_HOST));
         assert!(envs.iter().any(|(k, v)| k == ENV_PORT && v == "49321"));
         assert!(envs.iter().any(|(k, v)| k == ENV_TOKEN && v == &token));
+        assert!(envs
+            .iter()
+            .any(|(k, v)| k == ENV_ACCESS_TOKEN && v == &token));
         assert!(envs.iter().any(|(k, v)| k == "MEMECHO_EXTRA" && v == "1"));
     }
 
