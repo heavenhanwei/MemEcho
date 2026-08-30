@@ -18,6 +18,7 @@ release-artifacts/
 tmp/
 .pytest-tmp/
 *.tsbuildinfo
+apps/desktop/src-tauri/binaries/*.exe
 
 # Local agent/runtime state. Engineering outcomes belong in the tracked tree,
 # while sessions, logs, worktrees, credentials, and test sandboxes do not.

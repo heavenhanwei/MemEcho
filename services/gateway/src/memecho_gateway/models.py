@@ -354,6 +354,7 @@ class Health(BaseModel):
     status: Literal["ok"]
     provider: str
     version: str
+    protocol_version: int = 1
 
 
 class ProcessingStage(StrEnum):

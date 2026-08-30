@@ -306,7 +306,12 @@ def require_token(
 
 @app.get("/v1/health", response_model=Health)
 async def health() -> Health:
-    return Health(status="ok", provider=settings.memecho_provider, version=__version__)
+    return Health(
+        status="ok",
+        provider=settings.memecho_provider,
+        version=__version__,
+        protocol_version=1,
+    )
 
 
 class LlmTestRequest(BaseModel):

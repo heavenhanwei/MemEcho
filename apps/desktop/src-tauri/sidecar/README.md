@@ -18,11 +18,16 @@ The desktop supervisor resolves the binary at runtime
 2. next to the desktop executable;
 3. in a `binaries/` subdirectory next to the desktop executable.
 
-## Tauri configuration (enable once packaging lands)
+## Build and Tauri configuration
 
-Until the Python gateway can be compiled into a standalone executable, the
-`externalBin` entry stays disabled so `tauri build` does not fail on a
-missing binary. When packaging is unblocked, add:
+Install the packaging extra once, then build the target-triple executable:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e '.\services\gateway[packaging]'
+.\scripts\build-gateway-sidecar.ps1
+```
+
+`tauri.conf.json` declares the sidecar base name:
 
 ```jsonc
 // tauri.conf.json
@@ -42,9 +47,6 @@ missing binary. When packaging is unblocked, add:
 - Do NOT bake a fixed port; the supervisor picks a random loopback port and
   passes it through `MEMECHO_GATEWAY_PORT`.
 
-## Current blocker
-
-The Python gateway (`services/gateway`) has no standalone-executable build
-yet (e.g. PyInstaller/Nuitka with all provider adapters). Until that exists,
-`scripts/build-gateway-sidecar.ps1` exits with a documented blocker message,
-and the desktop falls back to dev/external gateway mode.
+The generated executable is intentionally ignored by Git. CI and release
+builds must run the script before `tauri build`; source archives remain free
+of platform binaries, credentials, and user data.

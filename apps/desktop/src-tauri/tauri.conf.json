@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build"
+    "beforeBuildCommand": "pnpm build --mode tauri"
   },
   "app": {
     "windows": [
@@ -33,6 +33,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "externalBin": ["binaries/memecho-gateway"],
     "resources": [],
     "windows": {
       "nsis": {

@@ -27,6 +27,9 @@ dev = [
   "pytest-asyncio>=1.1,<2",
   "respx>=0.22,<1"
 ]
+packaging = [
+  "pyinstaller>=6.16,<7"
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/memecho_gateway"]
@@ -34,4 +37,3 @@ packages = ["src/memecho_gateway"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-

@@ -57,17 +57,15 @@ Sidecar → 桌面端：在启动超时内监听 `127.0.0.1:$MEMECHO_GATEWAY_POR
 | `HealthFailed` / `InvalidHealth` | 健康检查失败或响应不合法 |
 | `InvalidUrl` | 外部 Gateway URL 不合法（拒绝查询参数/明文凭据/远程 HTTP） |
 
-## 后续打包阻塞（未解决）
+## Sidecar 构建
 
-Python Gateway（`services/gateway`）目前**没有独立可执行文件产物**。在
-冻结打包（如 PyInstaller，含全部 Provider 适配器）落地之前：
+`scripts/build-gateway-sidecar.ps1` 使用仓库虚拟环境中的 PyInstaller，
+生成 `apps/desktop/src-tauri/binaries/memecho-gateway-<target-triple>.exe`。
+Tauri `externalBin` 在安装包构建时携带该文件；生成物不进入 Git。
 
-- `resolve_sidecar_binary()` 返回 `None`，桌面端保持开发/外部模式；
-- `scripts/build-gateway-sidecar.ps1` 以明确的阻塞信息退出；
-- `tauri.conf.json` 暂不启用 `externalBin`（骨架见
-  `apps/desktop/src-tauri/sidecar/README.md`）；
-- 自动化测试使用可注入的 `memecho-gateway-testsidecar` 测试进程
-  （`src/bin/memecho-gateway-testsidecar.rs`）验证完整生命周期。
+自动化生命周期测试仍使用可注入的
+`memecho-gateway-testsidecar`，发布验收另外执行真实冻结 Gateway 的
+健康握手和安装后启动测试。
 
 ## 安全不变量
 
