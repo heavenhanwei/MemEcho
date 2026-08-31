@@ -174,16 +174,19 @@ def realtime_settings_for(
     profile: ProviderProfileView, api_key: str, settings: Settings
 ) -> Settings:
     """Settings copy for the realtime ASR client bound to a profile."""
+    workspace_id = profile.workspace_id or settings.bailian_workspace_id
+    realtime_url = profile.realtime_ws_url or settings.bailian_realtime_ws_url
+    if realtime_url and workspace_id:
+        for placeholder in ("{WorkspaceId}", "{workspace_id}", "{workspaceId}"):
+            realtime_url = realtime_url.replace(placeholder, workspace_id)
     return settings.model_copy(
         update={
             "bailian_audio_api_key": api_key,
-            "bailian_realtime_ws_url": (
-                profile.realtime_ws_url or settings.bailian_realtime_ws_url
-            ),
+            "bailian_realtime_ws_url": realtime_url,
             "bailian_realtime_model": (
                 profile.realtime_model or settings.bailian_realtime_model
             ),
-            "bailian_workspace_id": profile.workspace_id or settings.bailian_workspace_id,
+            "bailian_workspace_id": workspace_id,
         }
     )
 

@@ -52,6 +52,7 @@ $Arguments = @(
     "--clean",
     "--onefile",
     "--name", "memecho-gateway",
+    "--hide-console", "hide-early",
     "--paths", $GatewaySource,
     "--distpath", $DistDir,
     "--workpath", $WorkDir,

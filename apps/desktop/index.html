@@ -12,7 +12,14 @@
     <title>memEcho</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="startup-screen" role="status" aria-live="polite">
+        <div class="startup-orb" aria-hidden="true"></div>
+        <img src="/brand/memecho-wordmark.svg" alt="memEcho" />
+        <p>正在准备你的回声…</p>
+        <div class="startup-progress"><span></span></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

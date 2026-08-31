@@ -275,6 +275,25 @@ afterEach(() => {
 });
 
 describe("desktop analysis workflow", () => {
+  it("blocks deterministic mock output from being presented as a real report", async () => {
+    const calls = installDesktop();
+    vi.mocked(gateway.result).mockResolvedValue({
+      ...result,
+      provenance: {
+        ...result.provenance,
+        model_manifest: [{ provider: "mock", model: "deterministic-demo" }],
+      },
+    });
+
+    render(<App />);
+    await startAndStop();
+
+    expect(await screen.findByText(/Mock 演示模型/)).toBeInTheDocument();
+    expect(screen.queryByText("这次对话，发生了什么？")).not.toBeInTheDocument();
+    expect(gateway.artifacts).not.toHaveBeenCalled();
+    expect(calls.some((call) => call.cmd === "save_report_files")).toBe(false);
+  });
+
   it("uploads, analyzes, receives progress, loads artifacts, and saves before opening report", async () => {
     const order: string[] = [];
     const calls = installDesktop((cmd) => {

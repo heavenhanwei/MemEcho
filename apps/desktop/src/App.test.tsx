@@ -245,6 +245,40 @@ describe("App (web preview)", () => {
     expect(gateway.createSession).toHaveBeenCalledWith("新的回声", "microphone");
     expect(screen.getByText("正在录音")).toBeInTheDocument();
   });
+
+  it("automatically binds the only real provider profile to a new session", async () => {
+    vi.mocked(gateway.listProfiles).mockResolvedValue([{
+      id: "prof-bailian",
+      name: "百炼",
+      provider: "bailian",
+      text_base_url: "https://text.example/v1",
+      text_model: "qwen-max",
+      audio_base_url: "https://audio.example",
+      realtime_ws_url: "wss://workspace.example/realtime",
+      realtime_model: "qwen-asr",
+      workspace_id: "workspace",
+      credential_ref: "wincred:memecho:profile:prof-bailian:api_key",
+      capabilities: ["realtime_asr", "text_analysis"],
+      created_at: "2026-08-31T00:00:00Z",
+      updated_at: "2026-08-31T00:00:00Z",
+    }]);
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(
+      new FakeMediaStream() as unknown as MediaStream,
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByText("点击球体，开始录音"));
+
+    await waitFor(() =>
+      expect(gateway.createSession).toHaveBeenCalledWith(
+        "新的回声",
+        "microphone",
+        "prof-bailian",
+      ),
+    );
+    expect(setActiveProviderProfileId).toHaveBeenCalledWith("prof-bailian");
+  });
+  vi.mocked(gateway.listProfiles).mockResolvedValue([]);
 });
 
 describe("App (live resilience and Tauri desktop)", () => {

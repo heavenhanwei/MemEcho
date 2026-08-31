@@ -210,6 +210,28 @@ def test_profile_config_file_is_editable_and_reloadable(
     assert fetched.json()["name"] == "edited in json"
 
 
+def test_realtime_profile_expands_workspace_placeholder(
+    client: TestClient, cleanup_profiles: list[str]
+):
+    profile = make_profile(
+        client,
+        cleanup_profiles,
+        realtime_ws_url=(
+            "wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference"
+        ),
+        realtime_model="qwen-audio-3.0-asr-flash-streaming",
+        workspace_id="llm-workspace-123",
+    )
+    resolved = main.profile_registry.realtime_settings_for(
+        main.store.profiles[profile["id"]], PROFILE_SECRET, get_settings()
+    )
+
+    assert resolved.bailian_realtime_ws_url == (
+        "wss://llm-workspace-123.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference"
+    )
+    assert resolved.bailian_workspace_id == "llm-workspace-123"
+
+
 def test_invalid_profile_config_file_is_rejected_without_losing_profiles(
     client: TestClient, cleanup_profiles: list[str]
 ):

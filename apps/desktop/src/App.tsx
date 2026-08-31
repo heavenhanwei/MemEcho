@@ -80,7 +80,19 @@ function describeError(cause: unknown, fallback: string) {
 
 /** Create a gateway session bound to the active provider profile, if any. */
 async function createGatewaySession(title: string, sourceMode: string) {
-  const profileId = getActiveProviderProfileId();
+  let profileId = getActiveProviderProfileId();
+  const profiles = await gateway.listProfiles().catch(() => []);
+  if (profileId && !profiles.some((profile) => profile.id === profileId)) {
+    profileId = "";
+    setActiveProviderProfileId("");
+  }
+  if (!profileId) {
+    const realProfiles = profiles.filter((profile) => profile.provider !== "mock");
+    if (realProfiles.length === 1) {
+      profileId = realProfiles[0].id;
+      setActiveProviderProfileId(profileId);
+    }
+  }
   if (!profileId) return gateway.createSession(title, sourceMode);
   try {
     return await gateway.createSession(title, sourceMode, profileId);
@@ -821,6 +833,14 @@ function NowPage() {
   async function finishWorkflow(context: WorkflowContext) {
     state.patch({ stageLabel: "正在读取分析结果与报告文件", progress: 96 });
     const result = await gateway.result(context.gatewaySessionId);
+    const mockModels = result.provenance.model_manifest.filter(
+      (entry) => entry.provider.toLowerCase() === "mock",
+    );
+    if (mockModels.length > 0) {
+      throw new Error(
+        "本次会话使用了 Mock 演示模型，结果已被阻止展示。请在“我的 → 提供商配置”中验证真实模型后重新录制。",
+      );
+    }
     const artifacts = await gateway.artifacts(context.gatewaySessionId);
     try {
       const details = await gateway.processingDetails(context.gatewaySessionId);

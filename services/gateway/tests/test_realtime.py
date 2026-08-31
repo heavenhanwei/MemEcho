@@ -20,12 +20,12 @@ from memecho_gateway.realtime import (
 
 class FakeUpstreamSocket:
     def __init__(self) -> None:
-        self.sent: list[dict] = []
+        self.sent: list[dict | bytes] = []
         self.incoming: asyncio.Queue[object] = asyncio.Queue()
         self.closed = False
 
-    async def send(self, message: str) -> None:
-        self.sent.append(json.loads(message))
+    async def send(self, message: str | bytes) -> None:
+        self.sent.append(message if isinstance(message, bytes) else json.loads(message))
 
     async def recv(self) -> str | bytes:
         item = await self.incoming.get()
@@ -59,6 +59,14 @@ def test_build_realtime_url_keeps_configuration_explicit():
     assert "model=qwen3-asr-flash-realtime-2026-02-10" in url
     assert "heartbeat=true" in url
     assert "trace=on" in url
+
+
+def test_build_realtime_url_keeps_inference_endpoint_fixed():
+    url = build_realtime_url(
+        "wss://workspace.example/api-ws/v1/inference",
+        "qwen-audio-3.0-asr-flash-streaming",
+    )
+    assert url == "wss://workspace.example/api-ws/v1/inference"
 
 
 async def test_client_forwards_pcm_and_maps_official_events():
@@ -142,6 +150,65 @@ async def test_client_forwards_pcm_and_maps_official_events():
     await client.close()
     await client.close()
     assert socket.closed is True
+
+
+async def test_client_supports_qwen_audio_inference_protocol():
+    socket = FakeUpstreamSocket()
+    await socket.incoming.put(
+        json.dumps({"header": {"task_id": "server", "event": "task-started"}, "payload": {}})
+    )
+
+    async def connector(url: str, **_kwargs):
+        assert url.endswith("/api-ws/v1/inference")
+        return socket
+
+    client = BailianRealtimeClient(
+        realtime_settings(
+            bailian_realtime_ws_url="wss://workspace.example/api-ws/v1/inference",
+            bailian_realtime_model="qwen-audio-3.0-asr-flash-streaming",
+        ),
+        connector=connector,
+    )
+    await client.start()
+    run_task = socket.sent[0]
+    assert isinstance(run_task, dict)
+    assert run_task["header"]["action"] == "run-task"
+    assert run_task["payload"]["model"] == "qwen-audio-3.0-asr-flash-streaming"
+    assert await client.receive_event() == {
+        "type": "connection.state",
+        "state": "connected",
+    }
+
+    pcm = b"\x01\x02" * 1600
+    await client.send_audio(pcm)
+    assert socket.sent[1] == pcm
+    await socket.incoming.put(
+        json.dumps(
+            {
+                "header": {"task_id": client.task_id, "event": "result-generated"},
+                "payload": {
+                    "output": {
+                        "sentence": {
+                            "begin_time": 10,
+                            "end_time": 100,
+                            "text": "实时识别结果",
+                            "sentence_end": True,
+                        }
+                    }
+                },
+            }
+        )
+    )
+    assert await client.receive_event() == {
+        "type": "transcript.final",
+        "text": "实时识别结果",
+        "start_ms": 10,
+        "end_ms": 100,
+    }
+    await client.finish()
+    finish_task = socket.sent[-1]
+    assert isinstance(finish_task, dict)
+    assert finish_task["header"]["action"] == "finish-task"
 
 
 async def test_client_maps_disconnect_and_provider_errors_as_retryable():

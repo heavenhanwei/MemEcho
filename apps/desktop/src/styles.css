@@ -29,6 +29,37 @@ button, input { font: inherit; }
 button { color: inherit; cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: 0.5; }
 
+.startup-screen {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 22px;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 50% 38%, rgba(169, 155, 236, .2), transparent 28%),
+    radial-gradient(circle at 43% 58%, rgba(120, 188, 174, .14), transparent 24%),
+    var(--paper);
+}
+.startup-screen img { width: 172px; height: auto; }
+.startup-screen p { margin: 0; color: var(--muted); font-size: 13px; letter-spacing: .12em; }
+.startup-orb {
+  width: 104px;
+  height: 104px;
+  border-radius: 46% 54% 58% 42% / 45% 42% 58% 55%;
+  background: linear-gradient(135deg, rgba(111,91,211,.9), rgba(120,188,174,.7));
+  box-shadow: 0 24px 70px rgba(83, 69, 155, .2), inset 18px 12px 30px rgba(255,255,255,.28);
+  animation: startup-breathe 2.4s ease-in-out infinite alternate;
+}
+.startup-progress { width: 220px; height: 3px; overflow: hidden; border-radius: 999px; background: rgba(111,91,211,.12); }
+.startup-progress span { display: block; width: 44%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--violet), var(--mint)); animation: startup-flow 1.25s ease-in-out infinite; }
+@keyframes startup-breathe { to { transform: scale(1.07) rotate(3deg); border-radius: 55% 45% 43% 57% / 52% 58% 42% 48%; } }
+@keyframes startup-flow { from { transform: translateX(-110%); } to { transform: translateX(250%); } }
+@media (prefers-reduced-motion: reduce) {
+  .startup-orb, .startup-progress span { animation: none; }
+  .startup-progress span { width: 100%; opacity: .65; }
+}
+
 .app-shell { min-height: 100vh; display: grid; grid-template: 76px 1fr / 88px 1fr; }
 .topbar {
   grid-column: 1 / -1;

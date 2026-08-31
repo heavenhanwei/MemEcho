@@ -24,6 +24,7 @@ const ERROR_DETAIL_LIMIT = 320;
 let _url = BUILD_TIME_URL || DEFAULT_URL;
 let _token = isTauriRuntime() ? "" : BUILD_TIME_TOKEN || DEFAULT_TOKEN;
 let _initialized = false;
+let _initializing: Promise<string> | null = null;
 
 /** Current gateway base URL. Always use this getter, never the build-time const. */
 export function getGatewayUrl(): string {
@@ -48,6 +49,16 @@ export const gatewayBaseUrl = _url;
  */
 export async function initGatewayConfig(forceRestart = false): Promise<string> {
   if (_initialized && !forceRestart) return _url;
+  if (_initializing && !forceRestart) return _initializing;
+  _initializing = resolveGatewayConfig();
+  try {
+    return await _initializing;
+  } finally {
+    _initializing = null;
+  }
+}
+
+async function resolveGatewayConfig(): Promise<string> {
   if (isTauriRuntime()) {
     const { bridge } = await import("./tauri");
     try {
