@@ -36,11 +36,19 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 /// Startup handshake protocol version understood by this supervisor.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Base name of the bundled gateway sidecar executable.
 pub const SIDECAR_BASE_NAME: &str = "memecho-gateway";
+
+// Prevent the console-subsystem PyInstaller Sidecar from creating a visible
+// terminal window when it is launched by the Windows desktop application.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Environment variables of the startup handshake contract.
 pub const ENV_HOST: &str = "MEMECHO_GATEWAY_HOST";
@@ -195,6 +203,8 @@ pub fn build_sidecar_command(
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -556,6 +566,12 @@ mod tests {
             .iter()
             .any(|(k, v)| k == ENV_ACCESS_TOKEN && v == &token));
         assert!(envs.iter().any(|(k, v)| k == "MEMECHO_EXTRA" && v == "1"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_sidecar_uses_create_no_window_flag() {
+        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
     }
 
     #[tokio::test]
