@@ -1186,7 +1186,15 @@ function NowPage() {
             <RotateCcw size={15} /> {workflowBusy ? "正在重试…" : "重试当前步骤"}
           </button>
         )}
-        <ProcessingDetailsPanel details={processingDetails} showEmpty />
+        <ProcessingDetailsPanel
+          details={processingDetails}
+          showEmpty
+          modelName={
+            state.stageLabel.endsWith(" 正在形成回声")
+              ? state.stageLabel.slice(0, -" 正在形成回声".length)
+              : "文本分析模型"
+          }
+        />
       </section>
     );
   }

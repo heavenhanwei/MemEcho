@@ -71,6 +71,17 @@ describe("ProcessingDetailsPanel", () => {
     expect(screen.getByText("结束录音后，这里会显示上传、FileTrans 轮询和正式转写文本。")).toBeInTheDocument();
   });
 
+  it("shows the effective configured text model instead of a hard-coded version", () => {
+    render(
+      <ProcessingDetailsPanel
+        details={baseDetails()}
+        modelName="qwen3.8-max"
+      />,
+    );
+    expect(screen.getByText("qwen3.8-max")).toBeInTheDocument();
+    expect(screen.queryByText("Qwen3.7")).not.toBeInTheDocument();
+  });
+
   it("shows pipeline stages with counters", () => {
     render(<ProcessingDetailsPanel details={baseDetails()} />);
     expect(screen.getByText("PIPELINE · 会后处理详情")).toBeInTheDocument();

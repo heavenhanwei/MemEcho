@@ -170,9 +170,11 @@ function trackRows(track: TrackProcessingDetails) {
 export function ProcessingDetailsPanel({
   details,
   showEmpty = false,
+  modelName = "文本分析模型",
 }: {
   details: ProcessingDetails | null;
   showEmpty?: boolean;
+  modelName?: string;
 }) {
   if (!details || details.tracks.length === 0) {
     if (!showEmpty) return null;
@@ -191,7 +193,7 @@ export function ProcessingDetailsPanel({
           detail={filetransPhaseLabel.not_started}
         />
         <StageRow name="证据对齐" stage="queued" detail="等待正式转写" />
-        <StageRow name="Qwen3.7" stage="queued" detail="等待对齐结果" />
+        <StageRow name={modelName} stage="queued" detail="等待对齐结果" />
         <p className="processing-detail-hint" role="status">
           结束录音后，这里会显示上传、FileTrans 轮询和正式转写文本。
         </p>
@@ -245,7 +247,7 @@ export function ProcessingDetailsPanel({
         }
       />
       <StageRow
-        name="Qwen3.7"
+        name={modelName}
         stage={qwenStage}
         errorCode={details.qwen_error_code}
         detail={qwenDetail}

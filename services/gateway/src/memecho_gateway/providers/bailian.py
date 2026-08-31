@@ -19,7 +19,10 @@ VAD 表示情境中的表达状态，不表示真实内心。仅可使用输入�
 model_errors 是限定到 track 的局部失败，不代表整场会话失败。必须优先检查
 session.observations.evidence_availability：当 has_usable_text=true 且存在 aligned_segments 时，
 必须分析这些可用文本，不得因为另一轨静音、超时或转写失败而声称“没有文本”“所有转写不可用”
-或将 analysis_mode 设为 insufficient。失败轨只能作为缺失信号和不确定性说明，不能否定成功轨证据。"""
+或将 analysis_mode 设为 insufficient/text_only。失败轨只能作为缺失信号和不确定性说明，不能否定成功轨证据。
+当存在 aligned_segments 时，minutes.summary 和 evidence 不得为空；evidence.id 必须优先使用输入片段的
+evidence_id，segment_id/track/excerpt 必须忠实对应输入。即使谈话内容很短，也要概括实际说了什么，
+不能返回视觉上空白的报告。"""
 
 
 TEXT_ONLY_PROMPT = """TEXT-ONLY MODE: no audio or acoustic observation is available.
@@ -92,6 +95,45 @@ class BailianProvider:
                 item["origin"] = "suggested"
                 item["status"] = "proposed"
 
+    @staticmethod
+    def _aligned_content_errors(
+        result: dict[str, Any], has_aligned_text: bool
+    ) -> list[str]:
+        if not has_aligned_text:
+            return []
+        errors: list[str] = []
+        if result.get("analysis_mode") == "insufficient":
+            errors.append(
+                "analysis_mode cannot be insufficient when aligned transcript evidence exists"
+            )
+        elif result.get("analysis_mode") == "text_only":
+            errors.append(
+                "analysis_mode cannot be text_only when aligned audio transcript evidence exists"
+            )
+        minutes = result.get("minutes")
+        summary = minutes.get("summary") if isinstance(minutes, dict) else None
+        if not isinstance(summary, str) or not summary.strip():
+            errors.append("minutes.summary cannot be blank when aligned transcript exists")
+        evidence = result.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            errors.append("evidence cannot be empty when aligned transcript exists")
+        return errors
+
+    def _attach_model_manifest(
+        self, result: dict[str, Any], model: str | None
+    ) -> None:
+        provenance = result.get("provenance")
+        if not isinstance(provenance, dict):
+            return
+        settings = getattr(self, "settings", None)
+        provenance["model_manifest"] = [
+            {
+                "provider": "bailian",
+                "model": model
+                or getattr(settings, "bailian_text_model", "configured-text-model"),
+            }
+        ]
+
     async def analyze(
         self, session: dict[str, Any], tracks: list[str], request: dict[str, Any], **kwargs
     ) -> dict[str, Any]:
@@ -137,6 +179,7 @@ class BailianProvider:
             result = self._extract_json(repaired)
 
         self._enforce_conservative_recommendations(result)
+        self._attach_model_manifest(result, kwargs.get("model"))
 
         text_segments = (
             session.get("observations", {}).get("text_segments")
@@ -146,10 +189,7 @@ class BailianProvider:
         contract_errors = validate_result(result, text_segments=text_segments)
         observations = session.get("observations", {})
         has_aligned_text = bool(observations.get("aligned_segments"))
-        if has_aligned_text and result.get("analysis_mode") == "insufficient":
-            contract_errors.append(
-                "analysis_mode cannot be insufficient when aligned transcript evidence exists"
-            )
+        contract_errors.extend(self._aligned_content_errors(result, has_aligned_text))
         if not contract_errors:
             return result
         errors = [
@@ -192,7 +232,10 @@ class BailianProvider:
         )
         result = self._extract_json(repaired)
         self._enforce_conservative_recommendations(result)
-        if has_aligned_text and result.get("analysis_mode") == "insufficient":
+        self._attach_model_manifest(result, kwargs.get("model"))
+        final_errors = validate_result(result, text_segments=text_segments)
+        final_errors.extend(self._aligned_content_errors(result, has_aligned_text))
+        if final_errors:
             raise ValueError("upstream analysis ignored usable aligned transcript evidence")
         return result
 

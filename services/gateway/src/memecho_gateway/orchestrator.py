@@ -15,6 +15,9 @@ from .contracts import validate_result
 from .models import FileTransPhase, JobStatus, ProcessingStage
 from .quality import compute_quality_metrics, conservative_evidence_weights
 from .rendering import render_html, render_markdown
+from .providers.dashscope import DashScopeClient
+from .providers.oss import AliyunOSSClient
+from .providers.transcription import TranscriptionDownloader
 from .text_only import (
     build_text_segments,
     enforce_text_only_metadata,
@@ -113,6 +116,39 @@ class Orchestrator:
         self.transports: list[media.MediaTransport] = media.default_transports(
             self.oss
         )
+
+    def _audio_runtime(
+        self, overrides: ProviderOverrides | None
+    ) -> tuple[Any | None, Any | None, list[media.MediaTransport]]:
+        """Resolve real audio adapters for a real session profile.
+
+        A process started in mock compatibility mode must not feed mock
+        ``placeholder`` transcripts into a real profile's text model.
+        """
+        if not overrides or not overrides.profile_id or not overrides.supports_audio:
+            return self.dashscope, self.transcription, self.transports
+        base_settings = getattr(self.transcription, "settings", None) or getattr(
+            self.dashscope, "settings", None
+        )
+        if base_settings is None:
+            return self.dashscope, self.transcription, self.transports
+        runtime_settings = base_settings.model_copy(
+            update={
+                "bailian_audio_api_key": overrides.audio_api_key,
+                "bailian_audio_base_url": overrides.audio_endpoint,
+                "bailian_workspace_id": overrides.workspace_id,
+            }
+        )
+        dashscope = DashScopeClient(runtime_settings, mock=False)
+        transcription = TranscriptionDownloader(runtime_settings, mock=False)
+        oss_configured = bool(
+            runtime_settings.oss_endpoint
+            and runtime_settings.oss_bucket
+            and runtime_settings.oss_access_key_id
+            and runtime_settings.oss_access_key_secret
+        )
+        oss = AliyunOSSClient(runtime_settings, mock=False) if oss_configured else None
+        return dashscope, transcription, media.default_transports(oss)
 
     async def _invoke_module(
         self,
@@ -521,8 +557,9 @@ class Orchestrator:
             self.store.save_job_intermediate(job_id, session.job_intermediates[job_id])
         processing_details.set_alignment(session, 0)
 
+        model_label = (overrides.text_model if overrides else "") or "Text analysis model"
         await self.store.update_job(
-            job_id, JobStatus.analyzing, 66, "Qwen3.7 is analyzing text"
+            job_id, JobStatus.analyzing, 66, f"{model_label} is analyzing text"
         )
         session.resume_scheduled_jobs.discard(job_id)
         processing_details.set_qwen(session, ProcessingStage.running)
@@ -578,6 +615,23 @@ class Orchestrator:
         # keeps capability-driven selection out of business branches.
         audio_enabled = overrides.supports_audio if overrides else True
         effective_provider = provider or self.provider
+        runtime_dashscope, runtime_transcription, runtime_transports = (
+            self._audio_runtime(overrides)
+        )
+        audio_runner = self
+        if (
+            runtime_dashscope is not self.dashscope
+            or runtime_transcription is not self.transcription
+            or runtime_transports is not self.transports
+        ):
+            audio_runner = Orchestrator(
+                self.store,
+                effective_provider,
+                dashscope_client=runtime_dashscope,
+                transcription_downloader=runtime_transcription,
+                media_retention_seconds=self.media_retention_seconds,
+            )
+            audio_runner.transports = runtime_transports
         try:
             job = self.store.jobs[job_id]
             is_resume = job.status == JobStatus.awaiting_identity
@@ -602,7 +656,7 @@ class Orchestrator:
                 transport: media.MediaTransport | None = None
                 if audio_enabled and completed_uploads:
                     available_caps = tuple(
-                        item.capability for item in self.transports
+                        item.capability for item in runtime_transports
                     )
                     # Legacy clients that declare no media inputs keep the
                     # historical preference: object storage first when it is
@@ -616,15 +670,15 @@ class Orchestrator:
                     fallback = tuple(
                         item for item in preferred if item in available_caps
                     )
-                    if self.transcription or self.dashscope:
+                    if runtime_transcription or runtime_dashscope:
                         accepted = media.compatible_media_inputs(
-                            [self.transcription, self.dashscope], fallback
+                            [runtime_transcription, runtime_dashscope], fallback
                         )
                         if not accepted:
                             declared = tuple(
                                 dict.fromkeys(
                                     item
-                                    for client in (self.transcription, self.dashscope)
+                                    for client in (runtime_transcription, runtime_dashscope)
                                     if client is not None
                                     for item in media.accepted_media_inputs(
                                         client, fallback
@@ -651,7 +705,7 @@ class Orchestrator:
                             )
                     else:
                         accepted = fallback
-                    transport = media.select_transport(accepted, self.transports)
+                    transport = media.select_transport(accepted, runtime_transports)
                     if transport is None:
                         # Declared inputs exist but no transport can satisfy
                         # them (e.g. public_url required without object
@@ -726,9 +780,9 @@ class Orchestrator:
                         transport is not None
                         and transport.capability == media.MediaInput.public_url
                     )
-                    if not (self.dashscope and url_transport):
+                    if not (runtime_dashscope and url_transport):
                         missing.extend(["fun_asr", "emotion"])
-                    if not self.transcription:
+                    if not runtime_transcription:
                         missing.append("transcription")
                     for upload, _, _ in remote_tracks:
                         processing_details.mark_skipped_modules(
@@ -737,7 +791,7 @@ class Orchestrator:
 
                 observations = await asyncio.gather(
                     *(
-                        self._collect_remote_observations(
+                        audio_runner._collect_remote_observations(
                             item[2], session=session, upload_id=item[0].id,
                             job_id=job_id,
                             audio_kwargs=audio_kw if audio_kw else None,
@@ -746,6 +800,7 @@ class Orchestrator:
                     )
                 )
                 observations_by_upload_id: dict[str, dict[str, Any]] = {}
+                aligned: list[dict[str, Any]] = []
                 for remote_track, observation in zip(remote_tracks, observations, strict=True):
                     upload = remote_track[0]
                     observations_by_upload_id[upload.id] = observation
@@ -759,13 +814,20 @@ class Orchestrator:
                         {**error, "track": upload.track}
                         for error in observation["errors"]
                     )
+                    track_segments = align_intervals(
+                        observation["transcript"],
+                        observation["diarization"],
+                        observation["emotions"],
+                    )
+                    for index, segment in enumerate(track_segments):
+                        stable_id = f"{upload.track}_{index:04d}"
+                        segment["track"] = upload.track
+                        segment["segment_id"] = f"seg_{stable_id}"
+                        segment["evidence_id"] = f"ev_{stable_id}"
+                    aligned.extend(track_segments)
 
                 await self.store.update_job(job_id, JobStatus.aligning, 48, "对齐语言与声学证据")
-                if transcription_segments and (diarization or emotions):
-                    aligned = align_intervals(transcription_segments, diarization, emotions)
-                    log.info("Aligned %d segments for session %s", len(aligned), session_id)
-                else:
-                    aligned = []
+                log.info("Aligned %d track-scoped segments for session %s", len(aligned), session_id)
                 processing_details.set_alignment(session, len(aligned))
 
                 quality_metrics: list[dict[str, Any]] = []
@@ -812,6 +874,16 @@ class Orchestrator:
                     "successful_transcript_tracks": successful_transcript_tracks,
                     "failed_transcript_tracks": failed_transcript_tracks,
                 }
+                identified_speakers = {
+                    str(segment.get("speaker_id"))
+                    for segment in aligned
+                    if segment.get("speaker_id") not in {None, "", "unknown"}
+                }
+                # Identity confirmation is meaningful only when an actual
+                # diarization module separated multiple speakers. FileTrans
+                # labels alone remain usable evidence when diarization is
+                # unavailable and must not block the report indefinitely.
+                identity_required = bool(diarization) and len(identified_speakers) > 1
 
                 session.job_intermediates[job_id] = {
                     "aligned": aligned,
@@ -821,6 +893,7 @@ class Orchestrator:
                     "model_errors": model_errors,
                     "evidence_weights": evidence_weights,
                     "evidence_availability": evidence_availability,
+                    "identity_required": identity_required,
                 }
                 if hasattr(self.store, 'save_job_intermediate'):
                     self.store.save_job_intermediate(job_id, session.job_intermediates[job_id])
@@ -841,15 +914,19 @@ class Orchestrator:
                     "successful_transcript_tracks": [],
                     "failed_transcript_tracks": [],
                 }
+                identity_required = bool(intermediate.get("identity_required", False))
                 processing_details.set_alignment(session, len(aligned))
 
             # Check participant resolution before analysis
-            if not session.participant_resolution and aligned:
+            if not session.participant_resolution and aligned and identity_required:
                 # Multiple speakers detected but no resolution provided
                 await self.store.update_job(job_id, JobStatus.awaiting_identity, 55, "等待参与者身份确认")
                 return
 
-            await self.store.update_job(job_id, JobStatus.analyzing, 66, "Qwen3.7 正在形成回声")
+            model_label = text_kwargs.get("model") or "文本分析模型"
+            await self.store.update_job(
+                job_id, JobStatus.analyzing, 66, f"{model_label} 正在形成回声"
+            )
             session.resume_scheduled_jobs.discard(job_id)
             processing_details.set_qwen(session, ProcessingStage.running)
             result = await effective_provider.analyze(
@@ -872,13 +949,20 @@ class Orchestrator:
                 **text_kwargs,
             )
 
-            if result.get("analysis_mode") == "text_only":
+            if result.get("analysis_mode") == "text_only" and not aligned:
                 # Providers may conservatively downgrade an audio session when
                 # usable acoustic evidence is absent. Apply the same
                 # deterministic metadata guarantees as an explicit text input
                 # before contract validation.
                 enforce_text_only_metadata(result)
                 evidence_weights = conservative_evidence_weights([])
+            elif aligned and result.get("analysis_mode") in {"text_only", "insufficient"}:
+                processing_details.set_qwen(
+                    session, ProcessingStage.failed, "invalid_upstream_result"
+                )
+                raise AnalysisContractError(
+                    "audio analysis with aligned transcript cannot be empty or text_only"
+                )
             for point in result.get("vad_series", []):
                 point["linguistic_weight"] = evidence_weights["linguistic_weight"]
                 point["acoustic_weight"] = evidence_weights["acoustic_weight"]

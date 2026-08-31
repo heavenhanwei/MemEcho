@@ -11,10 +11,47 @@ import soundfile as sf
 from memecho_gateway.alignment import align_intervals
 from memecho_gateway.config import get_settings
 from memecho_gateway.models import SessionCreate
-from memecho_gateway.orchestrator import Orchestrator
+from memecho_gateway.orchestrator import Orchestrator, ProviderOverrides
 from memecho_gateway.providers.mock import MockProvider
 from memecho_gateway.providers.oss import AliyunOSSClient
 from memecho_gateway.store import MemoryStore, UploadRecord
+
+
+def test_real_profile_replaces_process_mock_audio_adapters(tmp_path):
+    settings = get_settings().model_copy(
+        update={
+            "oss_endpoint": "https://oss.example.invalid",
+            "oss_bucket": "bucket",
+            "oss_access_key_id": "id",
+            "oss_access_key_secret": "secret",
+        }
+    )
+    from memecho_gateway.providers.dashscope import DashScopeClient
+    from memecho_gateway.providers.transcription import TranscriptionDownloader
+
+    orchestrator = Orchestrator(
+        MemoryStore(tmp_path),
+        MockProvider(),
+        AliyunOSSClient(settings, mock=True),
+        DashScopeClient(settings, mock=True),
+        TranscriptionDownloader(settings, mock=True),
+    )
+
+    dashscope, transcription, transports = orchestrator._audio_runtime(
+        ProviderOverrides(
+            profile_id="prof_real",
+            supports_audio=True,
+            audio_api_key="profile-key",
+            audio_endpoint="https://audio.example.invalid",
+            workspace_id="workspace",
+        )
+    )
+
+    assert dashscope.mock is False
+    assert transcription.mock is False
+    assert dashscope.settings.bailian_audio_api_key == "profile-key"
+    assert transcription.settings.bailian_workspace_id == "workspace"
+    assert any(item.capability.value == "public_url" for item in transports)
 
 
 async def test_real_file_upload_delegates_to_resumable_without_read_bytes(
