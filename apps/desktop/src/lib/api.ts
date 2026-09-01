@@ -370,6 +370,9 @@ export interface ProviderProfileInput {
   text_base_url?: string;
   text_model?: string;
   audio_base_url?: string;
+  transcription_model?: string;
+  diarization_model?: string;
+  emotion_model?: string;
   realtime_ws_url?: string;
   realtime_model?: string;
   workspace_id?: string;
@@ -383,6 +386,9 @@ export interface ProviderProfile {
   text_base_url: string;
   text_model: string;
   audio_base_url: string;
+  transcription_model: string;
+  diarization_model: string;
+  emotion_model: string;
   realtime_ws_url: string;
   realtime_model: string;
   workspace_id: string;

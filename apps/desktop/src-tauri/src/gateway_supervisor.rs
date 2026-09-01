@@ -361,7 +361,13 @@ impl GatewaySupervisor {
                 .map_err(|error| SupervisorError::Spawn(error.to_string()))?;
             command.stdout(stdout).stderr(stderr);
         }
-        let mut child = tokio::process::Command::from(command)
+        let mut command = tokio::process::Command::from(command);
+        // Do not let the bundled Gateway outlive the desktop process.  The
+        // explicit shutdown path below handles normal exits; kill_on_drop is
+        // the safety net for window teardown, panics, or an interrupted app
+        // shutdown where the final Tauri Exit event is never delivered.
+        command.kill_on_drop(true);
+        let mut child = command
             .spawn()
             .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
 

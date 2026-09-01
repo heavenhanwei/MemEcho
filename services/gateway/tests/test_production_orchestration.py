@@ -44,6 +44,9 @@ def test_real_profile_replaces_process_mock_audio_adapters(tmp_path):
             audio_api_key="profile-key",
             audio_endpoint="https://audio.example.invalid",
             workspace_id="workspace",
+            transcription_model="profile-filetrans",
+            diarization_model="profile-diarization",
+            emotion_model="profile-emotion",
         )
     )
 
@@ -51,6 +54,9 @@ def test_real_profile_replaces_process_mock_audio_adapters(tmp_path):
     assert transcription.mock is False
     assert dashscope.settings.bailian_audio_api_key == "profile-key"
     assert transcription.settings.bailian_workspace_id == "workspace"
+    assert transcription.settings.bailian_transcription_model == "profile-filetrans"
+    assert dashscope.settings.bailian_diarization_model == "profile-diarization"
+    assert dashscope.settings.bailian_emotion_model == "profile-emotion"
     assert any(item.capability.value == "public_url" for item in transports)
 
 

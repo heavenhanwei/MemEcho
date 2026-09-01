@@ -62,6 +62,9 @@ class ProviderOverrides:
     audio_api_key: str = ""
     audio_endpoint: str = ""
     workspace_id: str = ""
+    transcription_model: str = ""
+    diarization_model: str = ""
+    emotion_model: str = ""
     # Profile the overrides were resolved from; None means the env/header
     # compatibility path.
     profile_id: str | None = None
@@ -137,6 +140,9 @@ class Orchestrator:
                 "bailian_audio_api_key": overrides.audio_api_key,
                 "bailian_audio_base_url": overrides.audio_endpoint,
                 "bailian_workspace_id": overrides.workspace_id,
+                "bailian_transcription_model": overrides.transcription_model,
+                "bailian_diarization_model": overrides.diarization_model,
+                "bailian_emotion_model": overrides.emotion_model,
             }
         )
         dashscope = DashScopeClient(runtime_settings, mock=False)

@@ -86,6 +86,9 @@ def build_profile_view(profile_id: str, data: dict[str, Any]) -> ProviderProfile
         text_base_url=data.get("text_base_url", ""),
         text_model=data.get("text_model", ""),
         audio_base_url=data.get("audio_base_url", ""),
+        transcription_model=data.get("transcription_model", ""),
+        diarization_model=data.get("diarization_model", ""),
+        emotion_model=data.get("emotion_model", ""),
         realtime_ws_url=data.get("realtime_ws_url", ""),
         realtime_model=data.get("realtime_model", ""),
         workspace_id=data.get("workspace_id", ""),
@@ -122,8 +125,8 @@ def build_profile_overrides(
     """Effective provider kwargs for a bound profile.
 
     Returns a dict consumed by the orchestrator: text/audio kwargs plus the
-    capability gates. Profile values win; env defaults only fill gaps for
-    bailian profiles.
+    capability gates. A bound profile is authoritative and never borrows
+    provider configuration from the process environment.
     """
     if profile.provider == "mock":
         return {"text_kwargs": {}, "audio_kwargs": {}, "supports_audio": False}
@@ -142,23 +145,30 @@ def build_profile_overrides(
     text_kwargs = {}
     if api_key:
         text_kwargs["api_key"] = api_key
-    base_url = profile.text_base_url or settings.bailian_text_base_url
+    base_url = profile.text_base_url
     if base_url:
         text_kwargs["base_url"] = base_url
-    model = profile.text_model or settings.bailian_text_model
+    model = profile.text_model
     if model:
         text_kwargs["model"] = model
 
     audio_kwargs: dict[str, str] = {}
     if api_key:
         audio_kwargs["api_key"] = api_key
-    audio_base = profile.audio_base_url or settings.bailian_audio_base_url
+    audio_base = profile.audio_base_url
     if audio_base:
         audio_kwargs["base_url"] = audio_base
-    workspace = profile.workspace_id or settings.bailian_workspace_id
+    workspace = profile.workspace_id
     if workspace:
         audio_kwargs["workspace_id"] = workspace
-    return {"text_kwargs": text_kwargs, "audio_kwargs": audio_kwargs, "supports_audio": True}
+    return {
+        "text_kwargs": text_kwargs,
+        "audio_kwargs": audio_kwargs,
+        "transcription_model": profile.transcription_model,
+        "diarization_model": profile.diarization_model,
+        "emotion_model": profile.emotion_model,
+        "supports_audio": True,
+    }
 
 
 def select_provider(kind: ProviderKind, settings: Settings) -> Any:
@@ -174,8 +184,8 @@ def realtime_settings_for(
     profile: ProviderProfileView, api_key: str, settings: Settings
 ) -> Settings:
     """Settings copy for the realtime ASR client bound to a profile."""
-    workspace_id = profile.workspace_id or settings.bailian_workspace_id
-    realtime_url = profile.realtime_ws_url or settings.bailian_realtime_ws_url
+    workspace_id = profile.workspace_id
+    realtime_url = profile.realtime_ws_url
     if realtime_url and workspace_id:
         for placeholder in ("{WorkspaceId}", "{workspace_id}", "{workspaceId}"):
             realtime_url = realtime_url.replace(placeholder, workspace_id)
@@ -183,9 +193,7 @@ def realtime_settings_for(
         update={
             "bailian_audio_api_key": api_key,
             "bailian_realtime_ws_url": realtime_url,
-            "bailian_realtime_model": (
-                profile.realtime_model or settings.bailian_realtime_model
-            ),
+            "bailian_realtime_model": profile.realtime_model,
             "bailian_workspace_id": workspace_id,
         }
     )
@@ -285,11 +293,9 @@ async def verify_profile(
     probes: list[CapabilityProbe] = []
 
     text_status, text_error = await _probe_chat_completions(
-        profile.text_base_url
-        or (settings.bailian_text_base_url if profile.provider == "bailian" else ""),
+        profile.text_base_url,
         api_key,
-        profile.text_model
-        or (settings.bailian_text_model if profile.provider == "bailian" else ""),
+        profile.text_model,
     )
     probes.append(
         CapabilityProbe(
@@ -308,7 +314,7 @@ async def verify_profile(
             # All bailian audio capabilities share one auth surface, so a
             # single bill-free probe covers them.
             audio_result = await _probe_dashscope_auth(
-                profile.audio_base_url or settings.bailian_audio_base_url, api_key
+                profile.audio_base_url, api_key
             )
         audio_status, audio_error = audio_result
         probes.append(

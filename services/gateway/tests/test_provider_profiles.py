@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +21,10 @@ import respx
 import httpx
 from fastapi.testclient import TestClient
 
-from memecho_gateway import main
+from memecho_gateway import main, profiles as profile_registry
 from memecho_gateway.config import get_settings
 from memecho_gateway.main import app
-from memecho_gateway.models import JobStatus
+from memecho_gateway.models import JobStatus, ProviderProfileView
 from memecho_gateway.orchestrator import ProviderOverrides
 
 PROFILE_SECRET = "sk-profile-secret-abc123"
@@ -110,6 +111,45 @@ def db_text() -> str:
     return path.read_bytes().decode("utf-8", errors="ignore")
 
 
+def test_bound_bailian_profile_never_borrows_env_provider_settings():
+    settings = get_settings().model_copy(
+        update={
+            "bailian_text_base_url": "https://env-text.example/v1",
+            "bailian_text_model": "env-text-model",
+            "bailian_audio_base_url": "https://env-audio.example",
+            "bailian_workspace_id": "env-workspace",
+            "bailian_realtime_ws_url": "wss://env-realtime.example",
+            "bailian_realtime_model": "env-realtime-model",
+            "bailian_transcription_model": "env-filetrans",
+            "bailian_diarization_model": "env-diarization",
+            "bailian_emotion_model": "env-emotion",
+        }
+    )
+    profile = ProviderProfileView(
+        id="prof_strict",
+        name="strict",
+        provider="bailian",
+        credential_ref="wincred:memecho:profile:strict:api_key",
+        transcription_model="profile-filetrans",
+        diarization_model="profile-diarization",
+        emotion_model="profile-emotion",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+    resolved = profile_registry.build_profile_overrides(profile, "profile-key", settings)
+    assert resolved["text_kwargs"] == {"api_key": "profile-key"}
+    assert resolved["audio_kwargs"] == {"api_key": "profile-key"}
+    assert resolved["transcription_model"] == "profile-filetrans"
+    assert resolved["diarization_model"] == "profile-diarization"
+    assert resolved["emotion_model"] == "profile-emotion"
+
+    realtime = profile_registry.realtime_settings_for(profile, "profile-key", settings)
+    assert realtime.bailian_realtime_ws_url == ""
+    assert realtime.bailian_realtime_model == ""
+    assert realtime.bailian_workspace_id == ""
+
+
 # ── CRUD and contract shape ──────────────────────────────────────────────────
 
 
@@ -122,6 +162,9 @@ def test_bailian_and_openai_profiles_can_be_created(
         provider="bailian",
         text_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         audio_base_url="https://dashscope.aliyuncs.com",
+        transcription_model="qwen3-asr-flash-filetrans",
+        diarization_model="fun-asr",
+        emotion_model="qwen3-asr-flash-filetrans",
     )
     openai = make_profile(
         client,
@@ -139,6 +182,9 @@ def test_bailian_and_openai_profiles_can_be_created(
         "audio_emotion",
         "text_analysis",
     }
+    assert bailian["transcription_model"] == "qwen3-asr-flash-filetrans"
+    assert bailian["diarization_model"] == "fun-asr"
+    assert bailian["emotion_model"] == "qwen3-asr-flash-filetrans"
     assert openai["capabilities"] == ["text_analysis"]
 
     listed = client.get("/v1/provider-profiles", headers=AUTH).json()

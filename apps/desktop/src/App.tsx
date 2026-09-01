@@ -1875,6 +1875,9 @@ function ProviderProfilesSection() {
   const [textBaseUrl, setTextBaseUrl] = useState("");
   const [textModel, setTextModel] = useState("");
   const [audioBaseUrl, setAudioBaseUrl] = useState("");
+  const [transcriptionModel, setTranscriptionModel] = useState("qwen3-asr-flash-filetrans");
+  const [diarizationModel, setDiarizationModel] = useState("fun-asr");
+  const [emotionModel, setEmotionModel] = useState("qwen3-asr-flash-filetrans");
   const [realtimeWsUrl, setRealtimeWsUrl] = useState("");
   const [realtimeModel, setRealtimeModel] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
@@ -1918,6 +1921,9 @@ function ProviderProfilesSection() {
         text_base_url: textBaseUrl.trim(),
         text_model: textModel.trim(),
         audio_base_url: audioBaseUrl.trim(),
+        transcription_model: transcriptionModel.trim(),
+        diarization_model: diarizationModel.trim(),
+        emotion_model: emotionModel.trim(),
         realtime_ws_url: realtimeWsUrl.trim(),
         realtime_model: realtimeModel.trim(),
         workspace_id: workspaceId.trim(),
@@ -1932,6 +1938,9 @@ function ProviderProfilesSection() {
       setTextBaseUrl("");
       setTextModel("");
       setAudioBaseUrl("");
+      setTranscriptionModel("qwen3-asr-flash-filetrans");
+      setDiarizationModel("fun-asr");
+      setEmotionModel("qwen3-asr-flash-filetrans");
       setRealtimeWsUrl("");
       setRealtimeModel("");
       setWorkspaceId("");
@@ -1943,7 +1952,7 @@ function ProviderProfilesSection() {
     } finally {
       setSaving(false);
     }
-  }, [name, provider, textBaseUrl, textModel, audioBaseUrl, realtimeWsUrl, realtimeModel, workspaceId, apiKey, refresh]);
+  }, [name, provider, textBaseUrl, textModel, audioBaseUrl, transcriptionModel, diarizationModel, emotionModel, realtimeWsUrl, realtimeModel, workspaceId, apiKey, refresh]);
 
   const verify = useCallback(async (profileId: string) => {
     setVerifyingId(profileId);
@@ -2132,6 +2141,33 @@ function ProviderProfilesSection() {
                   value={audioBaseUrl}
                   onChange={(e) => setAudioBaseUrl(e.target.value)}
                   placeholder="语音 Endpoint（可选，默认网关配置）"
+                  className="gateway-url-input"
+                />
+              </div>
+              <div className="gateway-config-row" style={{ marginTop: 4 }}>
+                <input
+                  type="text"
+                  value={transcriptionModel}
+                  onChange={(e) => setTranscriptionModel(e.target.value)}
+                  placeholder="FileTrans 模型，如 qwen3-asr-flash-filetrans"
+                  className="gateway-url-input"
+                />
+              </div>
+              <div className="gateway-config-row" style={{ marginTop: 4 }}>
+                <input
+                  type="text"
+                  value={diarizationModel}
+                  onChange={(e) => setDiarizationModel(e.target.value)}
+                  placeholder="说话人分离模型，如 fun-asr"
+                  className="gateway-url-input"
+                />
+              </div>
+              <div className="gateway-config-row" style={{ marginTop: 4 }}>
+                <input
+                  type="text"
+                  value={emotionModel}
+                  onChange={(e) => setEmotionModel(e.target.value)}
+                  placeholder="情绪识别模型，如 qwen3-asr-flash-filetrans"
                   className="gateway-url-input"
                 />
               </div>

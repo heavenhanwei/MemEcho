@@ -91,7 +91,13 @@ pub fn run() {
         .expect("error while building memEcho");
 
     app.run(|app_handle, event| {
-        if let tauri::RunEvent::Exit = event {
+        // Stop the managed Gateway as soon as an application exit is
+        // requested. Waiting only for the final Exit event can leave the
+        // sidecar alive when Windows tears down the event loop first.
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
             let state = app_handle.state::<AppState>();
             tauri::async_runtime::block_on(async move {
                 state.gateway.lock().await.shutdown().await;

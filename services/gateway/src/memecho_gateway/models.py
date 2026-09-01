@@ -509,6 +509,9 @@ class ProviderProfileCreate(StrictRequest):
     text_base_url: str = Field(default="", max_length=512)
     text_model: str = Field(default="", max_length=120)
     audio_base_url: str = Field(default="", max_length=512)
+    transcription_model: str = Field(default="qwen3-asr-flash-filetrans", max_length=120)
+    diarization_model: str = Field(default="fun-asr", max_length=120)
+    emotion_model: str = Field(default="qwen3-asr-flash-filetrans", max_length=120)
     realtime_ws_url: str = Field(default="", max_length=512)
     realtime_model: str = Field(default="", max_length=120)
     workspace_id: str = Field(default="", max_length=120)
@@ -522,6 +525,9 @@ class ProviderProfileUpdate(StrictRequest):
     text_base_url: str | None = Field(default=None, max_length=512)
     text_model: str | None = Field(default=None, max_length=120)
     audio_base_url: str | None = Field(default=None, max_length=512)
+    transcription_model: str | None = Field(default=None, max_length=120)
+    diarization_model: str | None = Field(default=None, max_length=120)
+    emotion_model: str | None = Field(default=None, max_length=120)
     realtime_ws_url: str | None = Field(default=None, max_length=512)
     realtime_model: str | None = Field(default=None, max_length=120)
     workspace_id: str | None = Field(default=None, max_length=120)
@@ -537,6 +543,9 @@ class ProviderProfileView(BaseModel):
     text_base_url: str = ""
     text_model: str = ""
     audio_base_url: str = ""
+    transcription_model: str = "qwen3-asr-flash-filetrans"
+    diarization_model: str = "fun-asr"
+    emotion_model: str = "qwen3-asr-flash-filetrans"
     realtime_ws_url: str = ""
     realtime_model: str = ""
     workspace_id: str = ""

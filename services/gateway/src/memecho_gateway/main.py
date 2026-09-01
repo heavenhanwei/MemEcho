@@ -164,6 +164,9 @@ async def lifespan(_: FastAPI):
                         }
                     )
                 )
+            # Canonical rewrite migrates older editable profile files with
+            # newly introduced non-secret fields and defaults.
+            profile_config.save(profile_path, list(store.profiles.values()))
         else:
             profile_config.save(profile_path, list(store.profiles.values()))
     except Exception:
@@ -310,6 +313,9 @@ def resolve_session_runtime(session) -> tuple[ProviderOverrides | None, object |
         audio_api_key=resolved["audio_kwargs"].get("api_key", ""),
         audio_endpoint=resolved["audio_kwargs"].get("base_url", ""),
         workspace_id=resolved["audio_kwargs"].get("workspace_id", ""),
+        transcription_model=resolved.get("transcription_model", ""),
+        diarization_model=resolved.get("diarization_model", ""),
+        emotion_model=resolved.get("emotion_model", ""),
         profile_id=profile_id,
         supports_audio=resolved["supports_audio"],
     )
@@ -425,6 +431,9 @@ async def create_provider_profile(payload: ProviderProfileCreate) -> ProviderPro
         text_base_url=payload.text_base_url,
         text_model=payload.text_model,
         audio_base_url=payload.audio_base_url,
+        transcription_model=payload.transcription_model,
+        diarization_model=payload.diarization_model,
+        emotion_model=payload.emotion_model,
         realtime_ws_url=payload.realtime_ws_url,
         realtime_model=payload.realtime_model,
         workspace_id=payload.workspace_id,
