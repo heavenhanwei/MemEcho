@@ -1,6 +1,6 @@
 # memEcho Windows MSI / NSIS 构建指南
 
-首版仅支持 Windows 11 x64。当前范围不包含代码签名、自动更新和 Microsoft Store 发布；因此路演安装包必须明确标注“未签名”，不能作为正式公开发行包。
+首版仅支持 Windows 11 x64。开发者本地构建默认不签名，只能用于内部验收；GitHub 的公开发布链路必须通过 SignPath 签署桌面端、Gateway 和安装包。当前范围仍不包含自动更新和 Microsoft Store 发布。
 
 ## 1. 构建机要求
 
@@ -73,7 +73,7 @@ Get-AuthenticodeSignature .\apps\desktop\src-tauri\target\release\bundle\msi\*.m
 Get-AuthenticodeSignature .\apps\desktop\src-tauri\target\release\bundle\nsis\*-setup.exe
 ```
 
-保存文件名、大小、SHA-256、Git commit、构建时间和签名状态。未签名是当前路演范围内的已知限制，必须在交付记录中明确；不得把 `NotSigned` 描述为已签名或可信发布。
+保存文件名、大小、SHA-256、Git commit、构建时间和签名状态。开发者本地构建若为 `NotSigned`，必须在内部交付记录中明确且不得公开发布；GitHub Release 的生产工作流要求状态为 `Valid` 并包含可信时间戳。
 
 ## 6. 干净 Windows 11 验收
 
@@ -112,5 +112,64 @@ memEcho-<version>-windows-x64/
 
 - 任一安装包无法安装、启动或卸载：停止发布，保留日志并修复后从新 commit 重建两种格式。
 - WebView2 下载受限：不要设置 `skip`；选择官方支持的嵌入引导程序或离线安装器方案，并重新测试安装包体积和离线安装。
-- SmartScreen 告警：路演版明确告知未签名；不得指导用户关闭系统安全功能。正式对外发布前补充可信代码签名。
+- SmartScreen 告警：不得指导用户关闭系统安全功能。先核验 Authenticode 与时间戳；签名有效但信誉不足时，保持同一发布者身份并向 Microsoft 提交误报复核。
 - 安装后真实录音或 Credential Manager 失败：视为发布阻断，不得以 Web mock 页面代替验收。
+
+## 9. 使用 GitHub Actions 生成 Release
+
+GitHub Release 不是源码仓库中的 `release/` 目录。Release 基于 Git Tag，`.exe`、`.msi` 和校验文件属于 Release Assets，由 CI 构建后上传；`target/`、`release-artifacts/` 和 sidecar `.exe` 继续保持在 `.gitignore` 中，不能提交进 Git。
+
+仓库已提供 `.github/workflows/release-windows.yml`。当 `v*` 标签推送到 GitHub 时，工作流会在 `windows-latest` Runner 上完成：
+
+1. 安装锁定版本的 pnpm、Node.js、Python 和 Rust。
+2. 从源码构建 `memecho-gateway-x86_64-pc-windows-msvc.exe` sidecar，不打包本地 `.env` 或 Credential Manager 凭据。
+3. 运行前端、Gateway 与 Rust 测试。
+4. 生成 NSIS `*-setup.exe` 和 MSI 安装包。
+5. 通过 SignPath 签署桌面端、Gateway、NSIS 与 MSI，并执行 Authenticode 验证。
+6. 创建草稿 GitHub Release，上传安装包、`SHA256SUMS.txt` 和 `SIGNATURES.json`。
+
+签名服务的申请和仓库变量配置见 [Windows 可信代码签名](windows-code-signing.md)。缺少任一生产签名配置时，工作流会主动失败，不会发布未签名安装包。
+
+发布前先确认四个版本号与标签一致：
+
+- `package.json`
+- `apps/desktop/package.json`
+- `apps/desktop/src-tauri/Cargo.toml`
+- `apps/desktop/src-tauri/tauri.conf.json`
+
+例如发布 `0.1.0`：
+
+```powershell
+git switch main
+git pull --ff-only
+git tag -a v0.1.0 -m "memEcho v0.1.0"
+git push origin v0.1.0
+```
+
+然后在 GitHub 仓库中依次打开 `Actions` → `Release Windows installers` 查看构建。构建成功后，打开 `Releases` → 对应草稿版本，下载并在干净 Windows 11 x64 机器上完成第 6 节验收；确认无误后再点击 `Publish release`。
+
+如果工作流无法创建 Release，在 GitHub 仓库 `Settings` → `Actions` → `General` → `Workflow permissions` 中确认允许工作流获得写权限。组织策略仍可能覆盖仓库设置。
+
+当前工作流不会读取或上传本地 `.env`。OSS 等本机环境配置不会自动进入 GitHub Runner，也不应该进入安装包。应用的 BYOK 配置由最终用户安装后写入配置文件和 Windows Credential Manager。
+
+> 代码签名不等同于首个版本必然立即获得 SmartScreen 信誉。保持同一发布者身份持续签名，并对误报文件提交 Microsoft 复核；若要求首次安装即由平台背书，应同时评估 Microsoft Store MSIX 渠道。
+
+## 10. 未签名 Preview 发布通道
+
+个人开发者在可信签名获批前，可使用 `v<版本>-preview.<序号>` 标签发布明确标识的 GitHub Prerelease。例如应用内部版本为 `0.1.0` 时：
+
+```powershell
+git tag -a v0.1.0-preview.1 -m "memEcho v0.1.0 preview 1"
+git push origin v0.1.0-preview.1
+```
+
+该标签仅触发 `.github/workflows/release-windows-preview.yml`；正式签名工作流明确排除 `*-preview.*` 标签。Preview 工作流会运行完整测试、构建 Gateway sidecar、NSIS 和 MSI，公开发布为 GitHub Prerelease，并附带：
+
+- `SHA256SUMS.txt`
+- `UNSIGNED-PREVIEW.json`
+- Git Tag 与 commit 对应关系
+- 明确的未签名和早期测试警告
+
+应用内部四处版本仍保持 `0.1.0`。不要把 Cargo、Tauri 或 MSI 版本改为 `0.1.0-preview.1`；Preview 序号只存在于 Git Tag 和 GitHub Release 名称中。
+
+Preview 安装包不能描述为“可信签名版”“正式版”或“已解决 SmartScreen”。不得指导用户关闭 Windows 安全功能。SignPath 配置完成后，再用不带 `-preview.*` 的正式 Tag 触发签名发布链路。
