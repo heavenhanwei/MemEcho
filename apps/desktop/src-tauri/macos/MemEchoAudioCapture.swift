@@ -255,7 +255,7 @@ guard let source = parseSource() else {
     fail("usage: memecho-audio-capture --source mic|system|mixed", code: 2)
 }
 
-let coordinator = AudioCoordinator(source: source)
+private let coordinator = AudioCoordinator(source: source)
 Task {
     do {
         try await coordinator.start()

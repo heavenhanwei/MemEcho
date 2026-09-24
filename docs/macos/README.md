@@ -93,8 +93,8 @@ security find-identity -v -p codesigning
 
 1. 先把上述 Secrets 配置完整；
 2. 同步修改根目录 `package.json`、桌面端 `package.json`、`tauri.conf.json` 和 `Cargo.toml` 中的版本号；
-3. 推送代码后创建同版本标签，例如 `git tag v0.1.1`；
-4. 执行 `git push origin v0.1.1`；
+3. 推送代码后创建同版本标签，例如 `git tag v0.1.2`；
+4. 执行 `git push origin v0.1.2`；
 5. 在 GitHub `Actions` 中查看 `Release macOS installer`；
 6. 成功后到 `Releases` 检查 Draft，其中应包含 `.dmg`、应用压缩包和 `SHA256SUMS-macos.txt`。
 
