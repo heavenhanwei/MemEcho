@@ -43,7 +43,7 @@ export const gatewayBaseUrl = _url;
  * 1. Supervisor runtime connection (managed sidecar on a random loopback
  *    port with a one-time token, or an attached external dev gateway).
  * 2. Explicit remote gateway setting: gateway.json URL + access token from
- *    Windows Credential Manager.
+ *    the native operating-system credential vault.
  *
  * Safe to call multiple times; first call wins. Returns the resolved URL.
  */
@@ -88,7 +88,7 @@ async function resolveGatewayConfig(): Promise<string> {
       _token = await bridge.credentialGet(GATEWAY_CREDENTIAL_NAME);
     } catch {
       // An installed build never falls back to an embedded token. The user
-      // provisions it once through Settings and it remains in Credential Manager.
+      // provisions it once through Settings and it remains in the system vault.
       _token = "";
     }
   }
@@ -107,7 +107,7 @@ export async function setGatewayUrl(url: string): Promise<void> {
   _url = url;
 }
 
-/** Store the access token in Credential Manager and retain it only in memory. */
+/** Store the access token in the system vault and retain it only in memory. */
 export async function setGatewayToken(token: string): Promise<void> {
   const normalized = token.trim();
   if (!normalized) throw new Error("Gateway token cannot be empty");

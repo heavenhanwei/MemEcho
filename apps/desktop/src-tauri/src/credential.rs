@@ -1,6 +1,6 @@
-/// Windows Credential Manager integration.
+/// Native operating-system credential vault integration.
 ///
-/// Stores and retrieves credentials using the Windows Credential Manager API.
+/// Uses Windows Credential Manager on Windows and Login Keychain on macOS.
 /// No plaintext secrets are written to config files.
 
 #[cfg(windows)]
@@ -89,7 +89,50 @@ mod platform {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod platform {
+    use security_framework::passwords::{
+        delete_generic_password, get_generic_password, set_generic_password,
+    };
+
+    const SERVICE: &str = "com.memecho.desktop";
+    const ACCOUNT_PREFIX: &str = "memecho:";
+
+    fn account(name: &str) -> String {
+        format!("{ACCOUNT_PREFIX}{name}")
+    }
+
+    pub fn credential_set(name: &str, secret: &str) -> Result<(), CredError> {
+        let account = account(name);
+        // The Security.framework wrapper creates or atomically updates the
+        // existing generic-password item; do not delete a valid key first.
+        set_generic_password(SERVICE, &account, secret.as_bytes())
+            .map_err(|error| CredError::Write(error.to_string()))
+    }
+
+    pub fn credential_get(name: &str) -> Result<String, CredError> {
+        let account = account(name);
+        let value = get_generic_password(SERVICE, &account).map_err(|_| CredError::NotFound)?;
+        String::from_utf8(value).map_err(|error| CredError::Read(error.to_string()))
+    }
+
+    pub fn credential_delete(name: &str) -> Result<(), CredError> {
+        let account = account(name);
+        delete_generic_password(SERVICE, &account).map_err(|_| CredError::NotFound)
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    pub enum CredError {
+        #[error("credential not found")]
+        NotFound,
+        #[error("failed to write credential: {0}")]
+        Write(String),
+        #[error("failed to read credential: {0}")]
+        Read(String),
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod platform {
     pub fn credential_set(_name: &str, _secret: &str) -> Result<(), CredError> {
         Err(CredError::Unsupported)
@@ -124,7 +167,7 @@ mod tests {
 
     #[test]
     fn test_credential_roundtrip() {
-        if cfg!(windows) {
+        if cfg!(any(windows, target_os = "macos")) {
             let test_name = "memecho_test_roundtrip";
             let test_secret = "test-secret-value-12345";
 
@@ -143,7 +186,7 @@ mod tests {
 
     #[test]
     fn test_credential_not_found() {
-        if cfg!(windows) {
+        if cfg!(any(windows, target_os = "macos")) {
             let result = credential_get("memecho_nonexistent_key_xyz");
             assert!(result.is_err());
         }
@@ -151,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_credential_delete_nonexistent() {
-        if cfg!(windows) {
+        if cfg!(any(windows, target_os = "macos")) {
             let result = credential_delete("memecho_nonexistent_key_xyz");
             assert!(result.is_err());
         }

@@ -16,7 +16,7 @@ pub struct CaptureThreadResult {
     pub bytes_written: u64,
 }
 
-/// Trait abstracting WASAPI device enumeration + capture.
+/// Trait abstracting native device enumeration and capture.
 pub trait AudioBackend: Send + 'static {
     fn enumerate_devices(&self) -> Result<Vec<AudioDevice>, CaptureError>;
     fn resolve_device(
@@ -294,6 +294,8 @@ pub enum CaptureError {
     ComInit,
     #[error("unsupported audio format: {0}")]
     UnsupportedFormat(String),
+    #[error("platform audio error: {0}")]
+    Platform(String),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -2162,7 +2162,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memecho-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs-next",
@@ -2170,6 +2170,7 @@ dependencies = [
  "parking_lot",
  "reqwest 0.12.28",
  "rusqlite",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2",

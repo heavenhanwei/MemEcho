@@ -1,0 +1,12 @@
+{
+  "bundle": {
+    "targets": ["nsis", "msi"],
+    "externalBin": ["binaries/memecho-gateway"],
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "installerHooks": "./installer-hooks.nsh"
+      }
+    }
+  }
+}

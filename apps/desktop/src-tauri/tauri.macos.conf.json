@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "externalBin": [
+      "binaries/memecho-gateway",
+      "binaries/memecho-audio-capture"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "entitlements": "./Entitlements.plist"
+    }
+  }
+}

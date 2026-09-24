@@ -394,7 +394,7 @@ describe("App (live resilience and Tauri desktop)", () => {
 
     render(<App />);
     expect(await screen.findByText(/真实麦克风（默认）/)).toBeInTheDocument();
-    expect(screen.getByText("桌面原生录音 · 麦克风＋系统输出双轨（WASAPI）")).toBeInTheDocument();
+    expect(screen.getByText("桌面原生录音 · 麦克风＋系统输出双轨")).toBeInTheDocument();
     expect(
       screen.getByText(/\u5b9e\u65f6\u5b57\u5e55\u4ec5\u4f7f\u7528\u9ea6\u514b\u98ce/),
     ).toBeInTheDocument();

@@ -1,0 +1,107 @@
+name: Build macOS application
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "apps/desktop/**"
+      - "services/gateway/**"
+      - "scripts/build-macos-sidecars.sh"
+      - "packages/contracts/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/macos-build.yml"
+      - ".github/workflows/release-macos.yml"
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "services/gateway/**"
+      - "scripts/build-macos-sidecars.sh"
+      - "packages/contracts/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/macos-build.yml"
+      - ".github/workflows/release-macos.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  macos-apple-silicon:
+    name: Build macOS 13+ (Apple Silicon)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      # CI artifacts are for validation. Public downloads must instead use a
+      # Developer ID Application identity and Apple notarization credentials.
+      APPLE_SIGNING_IDENTITY: "-"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify Apple Silicon runner
+        run: |
+          test "$(uname -m)" = "arm64" || {
+            echo "Expected an Apple Silicon runner, got $(uname -m)." >&2
+            exit 1
+          }
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/gateway/pyproject.toml
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -e 'services/gateway[dev,packaging]'
+
+      - name: Build bundled Gateway and native macOS audio helper
+        run: bash scripts/build-macos-sidecars.sh
+
+      - name: Run quality gates
+        run: |
+          pnpm typecheck
+          pnpm test
+          .venv/bin/python -m pytest services/gateway/tests
+          pnpm --filter @memecho/desktop build --mode tauri
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked -- --test-threads=1
+
+      - name: Build app bundle and DMG
+        run: pnpm --filter @memecho/desktop tauri build --bundles app,dmg
+
+      - name: Upload validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: memecho-macos-apple-silicon-${{ github.sha }}
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/macos/*.app
+            apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error

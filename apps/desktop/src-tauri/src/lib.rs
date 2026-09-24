@@ -99,6 +99,13 @@ pub fn run() {
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
             let state = app_handle.state::<AppState>();
+            // Stop native capture before the process exits. On macOS the
+            // capture threads own AVFoundation/ScreenCaptureKit helper
+            // processes, so dropping Rust handles alone would orphan them.
+            if let Some(mut stream) = state.live.stream.lock().take() {
+                stream.stop();
+            }
+            let _ = state.audio.lock().stop();
             tauri::async_runtime::block_on(async move {
                 state.gateway.lock().await.shutdown().await;
             });

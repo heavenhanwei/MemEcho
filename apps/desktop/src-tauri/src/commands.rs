@@ -23,7 +23,7 @@ pub struct StopResult {
     pub loopback_path: PathBuf,
 }
 
-/// List available audio devices using WASAPI IMMDeviceEnumerator.
+/// List available audio devices using the native platform backend.
 #[tauri::command]
 pub fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
     #[cfg(windows)]
@@ -31,7 +31,11 @@ pub fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
         let backend = crate::audio::capture::wasapi::WasapiBackend::new();
         backend.enumerate_devices().map_err(|e| e.to_string())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        Ok(crate::audio::macos::devices())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         Err("Audio device enumeration not supported on this platform".into())
     }
@@ -44,6 +48,9 @@ pub fn start_capture(
     render_device_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<CaptureInfo, String> {
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return Err("native audio capture is not supported on this platform".into());
+
     let mut capture = state.capture.lock();
 
     if capture.status != RecordingStatus::Idle {
@@ -101,6 +108,38 @@ pub fn start_capture(
                 started_at,
             )
             .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use crate::audio::macos::{MacAudioSource, MacosAudioBackend};
+
+        let mic_backend = MacosAudioBackend::new(MacAudioSource::Microphone)
+            .map_err(|error| error.to_string())?;
+        let loop_backend =
+            MacosAudioBackend::new(MacAudioSource::System).map_err(|error| error.to_string())?;
+        let mic_device = mic_backend
+            .resolve_device(mic_device_id.as_deref(), true)
+            .map_err(|error| error.to_string())?;
+        let loop_device = loop_backend
+            .resolve_device(render_device_id.as_deref(), false)
+            .map_err(|error| error.to_string())?;
+
+        let mut audio = state.audio.lock();
+        audio
+            .start_with_backends(
+                mic_backend,
+                loop_backend,
+                mic_device,
+                loop_device,
+                mic_wav,
+                loop_wav,
+                session_dir.clone(),
+                mic_wav_path.clone(),
+                loopback_wav_path.clone(),
+                started_at,
+            )
+            .map_err(|error| error.to_string())?;
     }
 
     let meta = RecoveryMeta {
@@ -281,19 +320,19 @@ pub fn delete_local_session(
     Ok(session)
 }
 
-/// Store a credential in Windows Credential Manager.
+/// Store a credential in the operating system credential vault.
 #[tauri::command]
 pub fn credential_set(name: String, secret: String) -> Result<(), String> {
     crate::credential::credential_set(&name, &secret).map_err(|e| e.to_string())
 }
 
-/// Retrieve a credential from Windows Credential Manager.
+/// Retrieve a credential from the operating system credential vault.
 #[tauri::command]
 pub fn credential_get(name: String) -> Result<String, String> {
     crate::credential::credential_get(&name).map_err(|e| e.to_string())
 }
 
-/// Delete a credential from Windows Credential Manager.
+/// Delete a credential from the operating system credential vault.
 #[tauri::command]
 pub fn credential_delete(name: String) -> Result<(), String> {
     crate::credential::credential_delete(&name).map_err(|e| e.to_string())
@@ -497,7 +536,7 @@ pub fn import_text_content(
 /// Upload session audio tracks to the gateway.
 ///
 /// Uses the managed Sidecar's memory-only token when its URL is targeted;
-/// explicit external gateways fall back to Windows Credential Manager.
+/// explicit external gateways fall back to the operating system credential vault.
 #[tauri::command]
 pub async fn upload_session_tracks(
     local_session_id: String,
@@ -626,7 +665,7 @@ pub fn get_provider_profiles_config_path(state: State<'_, AppState>) -> String {
         .into_owned()
 }
 
-/// Open the exact Provider Profile configuration file in the Windows editor.
+/// Open the exact Provider Profile configuration file in the native editor.
 #[tauri::command]
 pub fn open_provider_profiles_config(state: State<'_, AppState>) -> Result<(), String> {
     let path = state
@@ -644,17 +683,29 @@ pub fn open_provider_profiles_config(state: State<'_, AppState>) -> Result<(), S
             .map_err(|error| format!("open provider profile config: {}", error))?;
         Ok(())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = path;
-        Err("opening the configuration editor is supported on Windows only".to_string())
+        std::process::Command::new("open")
+            .arg("-e")
+            .arg(&path)
+            .spawn()
+            .map_err(|error| format!("open provider profile config: {error}"))?;
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|error| format!("open provider profile config: {error}"))?;
+        Ok(())
     }
 }
 
 // --- LLM config ---
 
 /// Load user LLM configuration (endpoints, model names, workspace ID).
-/// API keys are stored separately in Windows Credential Manager.
+/// API keys are stored separately in the operating system credential vault.
 #[tauri::command]
 pub fn get_llm_config(state: State<'_, AppState>) -> crate::llm_config::LlmConfig {
     crate::llm_config::load_llm_config(&state.sessions_dir)

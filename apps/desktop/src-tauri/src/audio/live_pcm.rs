@@ -69,7 +69,7 @@ impl Resampler {
     }
 }
 
-/// A thread-safe buffer that the WASAPI capture thread pushes PCM into
+/// A thread-safe buffer that the platform capture thread pushes PCM into
 /// and the Tauri command thread polls from.
 type SharedBuffer = Arc<Mutex<Vec<u8>>>;
 type SharedError = Arc<Mutex<Option<String>>>;
@@ -580,10 +580,82 @@ pub mod wasapi_live {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mock live backend for non-Windows / tests
+// macOS native live capture
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[cfg(not(windows))]
+#[cfg(all(target_os = "macos", not(test)))]
+pub mod macos_live {
+    use super::*;
+    use std::io::Read;
+
+    pub fn start_live_stream(
+        source: &str,
+        _mic_device_id: Option<&str>,
+        _render_device_id: Option<&str>,
+        pause: Arc<AtomicBool>,
+    ) -> Result<LiveStream, String> {
+        if !matches!(source, "mic" | "system" | "mixed") {
+            return Err(format!("unsupported macOS live audio source: {source}"));
+        }
+        let (mut child, mut stdout) = crate::audio::macos::spawn_live_helper(source)?;
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let pause_flag = pause.clone();
+        let buffer: SharedBuffer = Arc::new(Mutex::new(Vec::new()));
+        let error: SharedError = Arc::new(Mutex::new(None));
+        let stop = stop_flag.clone();
+        let output = buffer.clone();
+        let thread_error = error.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("live-pcm-macos".into())
+            .spawn(move || {
+                let mut chunk = [0u8; 8192];
+                while !stop.load(Ordering::SeqCst) {
+                    match stdout.read(&mut chunk) {
+                        Ok(0) => {
+                            if !stop.load(Ordering::SeqCst) {
+                                let status = child.wait().ok();
+                                *thread_error.lock() =
+                                    Some(crate::audio::macos::helper_exit_message(status));
+                            }
+                            break;
+                        }
+                        Ok(read) => {
+                            let aligned = read - (read % 2);
+                            if aligned > 0 {
+                                append_if_running(&output, &pause, &chunk[..aligned]);
+                            }
+                        }
+                        Err(cause) => {
+                            *thread_error.lock() =
+                                Some(format!("读取 macOS 实时音频失败：{cause}"));
+                            break;
+                        }
+                    }
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            })
+            .map_err(|cause| format!("启动 macOS 实时音频线程失败：{cause}"))?;
+
+        Ok(LiveStream {
+            stop_flag,
+            pause_flag,
+            handle: Some(handle),
+            buffer,
+            error,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock live backend for unsupported platforms and unit tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(any(
+    all(test, target_os = "macos"),
+    all(not(windows), not(target_os = "macos"))
+))]
 pub mod mock_live {
     use super::*;
 
@@ -629,7 +701,7 @@ pub mod mock_live {
 // Unified entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Start a live PCM stream. Platform-aware: WASAPI on Windows, mock elsewhere.
+/// Start a live PCM stream using the current platform's real audio backend.
 /// `pause` controls emission: while set, capture keeps running but no PCM is buffered.
 pub fn start_live_stream(
     source: &str,
@@ -641,7 +713,14 @@ pub fn start_live_stream(
     {
         wasapi_live::start_live_stream(source, mic_device_id, render_device_id, pause)
     }
-    #[cfg(not(windows))]
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        macos_live::start_live_stream(source, mic_device_id, render_device_id, pause)
+    }
+    #[cfg(any(
+        all(test, target_os = "macos"),
+        all(not(windows), not(target_os = "macos"))
+    ))]
     {
         mock_live::start_live_stream(source, mic_device_id, render_device_id, pause)
     }

@@ -342,7 +342,7 @@ async fn upload_track(
 /// Testable upload entry: upload both mic and loopback tracks with an explicit token.
 ///
 /// This function accepts the gateway token directly so integration tests can
-/// inject a mock token without touching Windows Credential Manager.
+/// inject a mock token without touching the operating-system credential vault.
 pub async fn upload_session_tracks_with_token(
     local_session_id: String,
     gateway_session_id: String,
@@ -442,7 +442,7 @@ pub fn select_gateway_token(
 
 /// Production entry point: upload both mic and loopback tracks for a session.
 ///
-/// Reads the gateway token from Windows Credential Manager, then delegates to
+/// Reads the gateway token from the operating-system credential vault, then delegates to
 /// `upload_session_tracks_with_token`.
 pub async fn upload_session_tracks_impl(
     local_session_id: String,

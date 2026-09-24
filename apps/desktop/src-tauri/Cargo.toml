@@ -1,6 +1,6 @@
 [package]
 name = "memecho-desktop"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 default-run = "memecho-desktop"
@@ -49,6 +49,10 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_Devices_FunctionDiscovery",
 ] }
+
+# macOS-specific: encrypted secrets in the user's Login Keychain.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
 
 [features]
 default = ["custom-protocol"]

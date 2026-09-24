@@ -540,7 +540,7 @@ function NowPage() {
 
   function startNativeLiveAudio() {
     nativeLiveActive.current = true;
-    // Poll native WASAPI PCM from the Tauri bridge and feed to the live WebSocket.
+    // Poll native PCM from the Tauri bridge and feed it to the live WebSocket.
     const poll = () => {
       if (!recordingActive.current) return;
       bridge
@@ -583,7 +583,7 @@ function NowPage() {
           socket.current?.close();
         });
     };
-    // Poll at ~50ms intervals (matches WASAPI 50ms buffer + 10ms poll sleep)
+    // Poll at ~50ms intervals to keep subtitle latency bounded on each platform.
     nativeLiveTimer.current = window.setInterval(poll, 50);
   }
 
@@ -604,7 +604,7 @@ function NowPage() {
     } finally {
       stopMeter();
       await stopBrowserCapture?.();
-      // Stop native WASAPI live stream if active
+      // Stop the native live stream if active.
       if (isTauri) {
         await bridge.stopLiveStream().catch(() => undefined);
       }
@@ -658,7 +658,7 @@ function NowPage() {
           renderDeviceId || null,
         );
         localSessionId.current = capture.session_id;
-        // Start native WASAPI live stream for real-time captioning, reusing
+        // Start the native platform audio stream for real-time captioning, reusing
         // the native capture audio source: "mic" for microphone-only,
         // "mixed" for microphone + system loopback averaged.
         const liveSource = source === "mixed" ? "mixed" : "mic";
@@ -1284,7 +1284,7 @@ function NowPage() {
         )}
         {isTauri && source === "mixed" && (
           <p className="live-scope-note">
-            实时字幕使用麦克风＋系统声音混合音源（WASAPI）；正式报告仍使用本地双轨录音。
+            实时字幕使用麦克风＋系统声音混合音源；正式报告仍使用本地双轨录音。
           </p>
         )}
         {!isTauri && source === "mixed" && (
@@ -1294,7 +1294,7 @@ function NowPage() {
         )}
         <p className="backend-note">
           {isTauri
-            ? "桌面原生录音 · 麦克风＋系统输出双轨（WASAPI）"
+            ? "桌面原生录音 · 麦克风＋系统输出双轨"
             : canCaptureBrowserAudio
               ? "网页调试模式 · 麦克风或用户授权的 Chrome 标签页音频"
               : "网页调试模式 · 当前浏览器仅支持麦克风"}
@@ -2015,7 +2015,7 @@ function ProviderProfilesSection() {
       <h2>提供商配置（BYOK）</h2>
       <p>
         一个配置统一整段会话的分析链路（实时字幕到正式报告）。API Key
-        只保存在 Windows Credential Manager，不会写入数据库、日志或网络响应。
+        只保存在系统凭据库（Windows Credential Manager / macOS Keychain），不会写入数据库、日志或网络响应。
       </p>
       <div style={{ marginBottom: 14 }}>
         <p className="gateway-hint" style={{ overflowWrap: "anywhere", marginBottom: 6 }}>
@@ -2032,7 +2032,7 @@ function ProviderProfilesSection() {
           </button>
         </div>
         <p className="gateway-hint" style={{ marginTop: 6 }}>
-          Endpoint、模型及 Workspace 可直接编辑；API Key 不写入文件，仍由 Windows Credential Manager 保存。
+          Endpoint、模型及 Workspace 可直接编辑；API Key 不写入文件，仍由系统凭据库保存。
         </p>
       </div>
       {profiles.length === 0 && (
@@ -2404,7 +2404,7 @@ function SettingsPage() {
               </div>
               <p className="gateway-hint">
                 {tokenSaved
-                  ? "令牌已保存在 Windows Credential Manager，不会写入项目或配置文件。"
+                  ? "令牌已保存在系统凭据库，不会写入项目或配置文件。"
                   : "尚未配置令牌；分析请求将不可用。"}
               </p>
               {tokenError && <p className="error-banner">{tokenError}</p>}
@@ -2449,7 +2449,7 @@ function SettingsPage() {
           </div>
           {textLlmStatus === "ok" && <p className="gateway-ok">✓ 配置已保存</p>}
           {textLlmStatus === "fail" && <p className="error-banner">✗ {textLlmError}</p>}
-          <p className="gateway-hint">支持 OpenAI 兼容接口（/chat/completions）。API Key 安全存储在 Windows Credential Manager。</p>
+          <p className="gateway-hint">支持 OpenAI 兼容接口（/chat/completions）。API Key 安全存储在系统凭据库。</p>
         </article>
         <article>
           <h2>语音转写模型</h2>
@@ -2485,7 +2485,7 @@ function SettingsPage() {
           </div>
           {audioAsrStatus === "ok" && <p className="gateway-ok">✓ 配置已保存</p>}
           {audioAsrStatus === "fail" && <p className="error-banner">✗ {audioAsrError}</p>}
-          <p className="gateway-hint">支持 DashScope 兼容接口。API Key 安全存储在 Windows Credential Manager。</p>
+          <p className="gateway-hint">支持 DashScope 兼容接口。API Key 安全存储在系统凭据库。</p>
         </article>
         <article>
           <h2>数据位置</h2>

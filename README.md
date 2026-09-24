@@ -1,6 +1,6 @@
 # memEcho Desktop
 
-memEcho Windows 桌面路演版。客户端负责双轨录音、本地会话与记忆；网关负责百炼实时转写、会后说话人分离、声学证据融合与 memEcho 1.1 报告生成。
+memEcho Windows / macOS 桌面应用。客户端负责双轨录音、本地会话与记忆；网关负责百炼实时转写、会后说话人分离、声学证据融合与 memEcho 1.1 报告生成。
 
 ## 目录
 
@@ -27,6 +27,7 @@ python services/gateway/scripts/generate_types.py --check
 
 - [SAE / ALB / OSS 与生产容器部署](docs/v0.1.0/deployment.md)
 - [Windows MSI / NSIS 构建](docs/v0.1.0/windows-release.md)
+- [macOS 应用架构、构建与验收](docs/macos/README.md)
 - [路演版发布验收清单](docs/v0.1.0/release-checklist.md)
 - [产品端到端验收矩阵](docs/v0.1.0/roadshow-acceptance.md)
 

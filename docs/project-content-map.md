@@ -15,7 +15,11 @@
 
 ## 工程文档
 
-工程文档按版本归档。`docs/v0.1.0/` 保留已实现的路演版记录；`docs/open-source-edition/` 保存下一阶段“开源版”目标架构。目标架构不等于当前代码已经实现。
+工程文档按版本归档。`docs/v0.1.0/` 保留已实现的路演版记录；`docs/open-source-edition/` 保存“开源版”目标架构；`docs/cloud-edition/` 保存 Cloud 商业形态的目标架构。目标架构不等于当前代码已经实现。
+
+### Cloud 版（目标架构）
+
+- [Cloud 混合架构方案](cloud-edition/architecture.md)：Cloud 托管语音链路，本地 OpenAI-compatible BYOK 文本分析
 
 ### 开源版（目标架构）
 
@@ -30,6 +34,7 @@
 - [Gateway 本地配置](v0.1.0/gateway-setup.md)
 - [部署说明](v0.1.0/deployment.md)
 - [Windows 发布](v0.1.0/windows-release.md)
+- [macOS 应用架构、构建与验收](macos/README.md)
 - [发布门禁](v0.1.0/release-checklist.md)
 - [路演验收](v0.1.0/roadshow-acceptance.md)
 - [前端性能测量](v0.1.0/frontend-performance.md)
